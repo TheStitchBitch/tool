@@ -1,622 +1,314 @@
 from __future__ import annotations
-import base64, io, zipfile, colorsys, math, json
-from typing import Dict, List, Tuple, Iterable
+import io, json, math, zipfile
+from typing import Dict, Tuple, List, Optional
 
-from flask import Flask, request, render_template_string, jsonify, send_file, abort
-from PIL import Image, ImageDraw, ImageOps
+from flask import Flask, request, send_file, jsonify, make_response
+from PIL import Image, ImageDraw, ImageFont
+
+# Optional embroidery support
+try:
+    from pyembroidery import EmbPattern, write_dst, write_pes  # type: ignore
+    HAS_PYEMB = True
+except Exception:
+    HAS_PYEMB = False
 
 app = Flask(__name__)
 
-# ----------------- Marketing + SEO -----------------
-SITE_TITLE = "StitchBitch • Free Stitch Pattern Maker"
-SITE_DESC = "Turn any image into a clean stitch pattern. Free tool with grid, numbering, PDF, palette, and fabric size calculator."
-SITE_URL  = "http://127.0.0.1:5000"  # replace in prod
+# ---------------------- security / config ----------------------
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB limit
+ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
-# ----------------- Image helpers -----------------
+CELL_PX = 12
+BOLD_EVERY = 10
+MAX_DIM = 8000  # max allowed image dimension (px)
 
-def _to_rgb(img: Image.Image) -> Image.Image:
+# ---------------------- utilities ----------------------
+def clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
+
+def open_image(fs) -> Image.Image:
+    """Open upload and normalize to RGB on white for stable quantization."""
+    img = Image.open(fs.stream)
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        return bg
     return img.convert("RGB")
 
-def clamp_int(x: int, lo: int, hi: int) -> int:
-    return max(lo, min(hi, x))
-
-def resize_image(img: Image.Image, width: int) -> Image.Image:
+def resize_for_stitch_width(img: Image.Image, stitch_w: int) -> Image.Image:
     w, h = img.size
-    width = clamp_int(width, 20, 1200)
-    if width <= 0 or width == w:
-        return img
-    new_h = max(1, int(h * (width / float(w))))
-    return img.resize((width, new_h), Image.Resampling.LANCZOS)
+    # pre-shrink huge images for speed
+    if max(w, h) > 2000:
+        img = img.copy()
+        img.thumbnail((2000, 2000))
+        w, h = img.size
+    ratio = stitch_w / float(w)
+    new_h = max(1, int(round(h * ratio)))
+    return img.resize((stitch_w, new_h), Image.Resampling.LANCZOS)
 
-def quantize_image(img: Image.Image, colors: int, dither: bool) -> Image.Image:
-    colors = clamp_int(colors, 2, 64)
-    d = Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE
-    return img.convert("P", palette=Image.Palette.ADAPTIVE, colors=colors, dither=d).convert("RGB")
-
-def draw_grid_numbered(img: Image.Image, grid_px: int, bold_every: int = 10, show_numbers: bool = True) -> Image.Image:
-    """Nearest-scale pixel art with grid and 10x10 numbering."""
-    w, h = img.size
-    cell = clamp_int(grid_px, 4, 40)
-    big = img.resize((w * cell, h * cell), Image.Resampling.NEAREST)
-    draw = ImageDraw.Draw(big)
-
-    # Grid
-    for x in range(w + 1):
-        thick = 2 if (x % bold_every == 0) else 1
-        alpha = 180 if (x % bold_every == 0) else 70
-        c = (0, 0, 0, alpha)
-        for t in range(thick):
-            draw.line([(x * cell + t, 0), (x * cell + t, h * cell)], fill=c)
-    for y in range(h + 1):
-        thick = 2 if (y % bold_every == 0) else 1
-        alpha = 180 if (y % bold_every == 0) else 70
-        c = (0, 0, 0, alpha)
-        for t in range(thick):
-            draw.line([(0, y * cell + t), (w * cell, y * cell + t)], fill=c)
-
-    # 10x10 numbering along top and left
-    if show_numbers:
-        for x in range(bold_every, w + 1, bold_every):
-            label = str(x)
-            tw, th = draw.textlength(label), 10  # approx text height
-            draw.text((x * cell + 2, 2), label, fill=(0, 0, 0))
-        for y in range(bold_every, h + 1, bold_every):
-            draw.text((2, y * cell + 2), str(y), fill=(0, 0, 0))
-    return big
+def quantize(img: Image.Image, k: int) -> Image.Image:
+    """Median-cut palette, no dithering for crisp cells."""
+    return img.convert("P", palette=Image.Palette.ADAPTIVE, colors=k,
+                       dither=Image.Dither.NONE).convert("RGB")
 
 def palette_counts(img: Image.Image) -> Dict[Tuple[int,int,int], int]:
     counts: Dict[Tuple[int,int,int], int] = {}
-    for rgb in _to_rgb(img).getdata():
+    for rgb in img.getdata():
         counts[rgb] = counts.get(rgb, 0) + 1
     return counts
 
-def rgb_to_hex(rgb: Tuple[int,int,int]) -> str:
-    return "#%02x%02x%02x" % rgb
+def to_hex(rgb: Tuple[int,int,int]) -> str:
+    r, g, b = rgb
+    return f"#{r:02X}{g:02X}{b:02X}"
 
-def sorted_palette(pc: Dict[Tuple[int,int,int], int]) -> List[Tuple[Tuple[int,int,int], int]]:
-    def key(kv):
-        (r,g,b), n = kv
-        h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
-        return (-n, round(h,3), round(s,3), round(v,3))
-    return sorted(pc.items(), key=key)
+def luminance(rgb: Tuple[int,int,int]) -> float:
+    r, g, b = rgb
+    return 0.2126*r + 0.7152*g + 0.0722*b
 
-def legend_strip(pairs: List[Tuple[Tuple[int,int,int], int]], width: int) -> Image.Image:
-    if not pairs:
-        return Image.new("RGB", (max(1,width), 24), "white")
-    w = max(120, width)
-    bar_h = 22
-    img = Image.new("RGB", (w, bar_h), "white")
-    draw = ImageDraw.Draw(img)
-    total = sum(n for _, n in pairs)
-    x = 0
-    for rgb, n in pairs:
-        seg = max(1, int(w * (n / total)))
-        draw.rectangle([(x, 0), (min(w-1, x+seg), bar_h-1)], fill=rgb)
-        x += seg
-    return img
-
-def png_bytes(img: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-def data_url(img: Image.Image) -> str:
-    return "data:image/png;base64," + base64.b64encode(png_bytes(img)).decode("ascii")
-
-# ----------------- Fabric size calculator -----------------
-
-def fabric_sizes(stitches_w: int, stitches_h: int, counts: Iterable[int]=(11,14,16,18), margin_in: float=2.0):
-    """
-    Return list of dicts: count, finished_w_in, finished_h_in, cut_w_in, cut_h_in (with margins).
-    """
-    out = []
-    for c in counts:
-        fw = stitches_w / c
-        fh = stitches_h / c
-        cw = fw + margin_in*2
-        ch = fh + margin_in*2
-        out.append({
-            "count": c,
-            "finished_in": [round(fw,2), round(fh,2)],
-            "finished_cm": [round(fw*2.54,1), round(fh*2.54,1)],
-            "cut_in": [round(cw,2), round(ch,2)],
-        })
+def draw_grid(base: Image.Image, cell_px: int, bold_every: int = BOLD_EVERY) -> Image.Image:
+    """Scale each stitch to a cell and overlay a grid (bold every N)."""
+    sx, sy = base.size
+    out = base.resize((sx*cell_px, sy*cell_px), Image.Resampling.NEAREST)
+    draw = ImageDraw.Draw(out)
+    thin = (0, 0, 0, 70)
+    bold = (0, 0, 0, 170)
+    for x in range(sx + 1):
+        draw.line([(x*cell_px, 0), (x*cell_px, sy*cell_px)],
+                  fill=(bold if x % bold_every == 0 else thin), width=1)
+    for y in range(sy + 1):
+        draw.line([(0, y*cell_px), (sx*cell_px, y*cell_px)],
+                  fill=(bold if y % bold_every == 0 else thin), width=1)
     return out
 
-# ----------------- Light DMC approximation (small set) -----------------
-# Approximate hex for common DMC shades (subset). Not official. For reference only.
-_DMC = [
-    ("BLANC","White","#ffffff"),
-    ("310","Black","#000000"),
-    ("ECRU","Ecru","#f2e2ce"),
-    ("321","Red","#c32026"),
-    ("666","Bright Red","#d10f1b"),
-    ("498","Dark Red","#8e1d2c"),
-    ("352","Coral Lt","#f7a195"),
-    ("3712","Salmon Md","#ea8d8b"),
-    ("3713","Salmon Vy Lt","#ffd3cf"),
-    ("720","Orange Spice","#c6521c"),
-    ("741","Tangerine Md","#ffa31a"),
-    ("742","Tangerine Lt","#ffc03b"),
-    ("743","Yellow Md","#ffd35e"),
-    ("745","Yellow Pale","#fff2b3"),
-    ("744","Yellow Pale Lt","#fff7cc"),
-    ("727","Topaz Vy Lt","#fff0a3"),
-    ("743","Yellow Md","#ffd35e"),
-    ("738","Tan Vy Lt","#e9c9a2"),
-    ("739","Tan Ult Vy Lt","#f3dcc2"),
-    ("3826","Golden Brown","#a3692b"),
-    ("3827","Pale Golden Brown","#f3b774"),
-    ("3852","Straw Dk","#c9972b"),
-    ("3822","Straw Lt","#f2d277"),
-    ("334","Baby Blue Md","#7299c6"),
-    ("3325","Baby Blue Lt","#b9d6f2"),
-    ("3755","Baby Blue Vy Lt","#cde3f6"),
-    ("3761","Sky Blue Lt","#cfe6ef"),
-    ("798","Delft Blue Dk","#2f4e8b"),
-    ("820","Royal Blue Vy Dk","#1a2a6b"),
-    ("939","Navy Blue Vy Dk","#111b3a"),
-    ("995","Electric Blue Dk","#0aa3d9"),
-    ("996","Electric Blue Lt","#35c6ff"),
-    ("909","Emerald Green Vy Dk","#0b6a4a"),
-    ("912","Emerald Green Lt","#3fbf9a"),
-    ("703","Chartreuse","#7ac70c"),
-    ("704","Chartreuse Bright","#9be31b"),
-    ("907","Parrot Green Lt","#b4d92a"),
-    ("500","Blue Green Vy Dk","#0f3b33"),
-    ("522","Fern Green Lt","#afb79a"),
-    ("844","Beaver Gray Ult Dk","#5a5a5a"),
-    ("3799","Pewter Gray Vy Dk","#363636"),
-    ("415","Pearl Gray","#c7c7c7"),
-    ("762","Pearl Gray Vy Lt","#eeeef0"),
-    ("434","Brown Lt","#b37d43"),
-    ("801","Coffee Brown Dk","#6b4229"),
-    ("898","Coffee Brown Vy Dk","#4f2d1a"),
-    ("3371","Black Brown","#2b1a10"),
-    ("950","Desert Sand Lt","#f2c7a5"),
-    ("948","Peach Vy Lt","#ffe0cf"),
-    ("754","Peach Lt","#f6c9b4"),
-    ("3824","Apricot Lt","#f7b4a4"),
-    ("550","Violet Vy Dk","#4b2166")
-]
+def assign_symbols(colors: List[Tuple[int,int,int]]) -> Dict[Tuple[int,int,int], str]:
+    """Deterministic symbol per palette color."""
+    glyphs = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+*#@&%=?/\\^~<>□■●▲◆★✚")
+    return {c: glyphs[i % len(glyphs)] for i, c in enumerate(colors)}
 
-def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
-    h = h.strip().lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0,2,4))  # type: ignore
+def draw_symbols_on_grid(base: Image.Image, cell_px: int, sym_map: Dict[Tuple[int,int,int], str]) -> Image.Image:
+    """Overlay symbol per stitch, then grid."""
+    sx, sy = base.size
+    out = base.resize((sx*cell_px, sy*cell_px), Image.Resampling.NEAREST)
+    draw = ImageDraw.Draw(out)
+    font = ImageFont.load_default()
+    for y in range(sy):
+        for x in range(sx):
+            rgb = base.getpixel((x, y))
+            sym = sym_map[rgb]
+            fill = (0,0,0) if luminance(rgb) > 140 else (255,255,255)
+            draw.text((x*cell_px + cell_px//2, y*cell_px + cell_px//2),
+                      sym, font=font, fill=fill, anchor="mm")
+    # grid overlay
+    thin = (0, 0, 0, 70)
+    bold = (0, 0, 0, 170)
+    for x in range(sx + 1):
+        draw.line([(x*cell_px, 0), (x*cell_px, sy*cell_px)],
+                  fill=(bold if x % 10 == 0 else thin), width=1)
+    for y in range(sy + 1):
+        draw.line([(0, y*cell_px), (sx*cell_px, y*cell_px)],
+                  fill=(bold if y % 10 == 0 else thin), width=1)
+    return out
 
-DMC_PALETTE: List[Tuple[str,str,Tuple[int,int,int]]] = [(code,name,_hex_to_rgb(hx)) for code,name,hx in _DMC]
+# ---------------------- stitch & knit math ----------------------
+def skeins_per_color(stitches: int, cloth_count: int, strands: int, waste: float) -> float:
+    """
+    One DMC skein = 8 m * 6 strands = 48 m single-strand.
+    Per-skein bundle length = 48/strands m.
+    Bundle length per stitch ≈ 2*sqrt(2)*(2.54/count) cm; add waste fraction.
+    """
+    per_stitch_cm = 2.0 * math.sqrt(2.0) * (2.54 / float(cloth_count))
+    per_stitch_cm *= (1.0 + waste)
+    bundle_cm_per_skein = (800.0 * 6.0) / float(strands)
+    return (stitches * per_stitch_cm) / bundle_cm_per_skein
 
-def nearest_dmc(rgb: Tuple[int,int,int]) -> Tuple[str,str,str,int]:
-    """Return (code, name, hex, distance)."""
-    r,g,b = rgb
-    best = None
-    best_d = 1e9
-    for code,name,drgb in DMC_PALETTE:
-        d = (r-drgb[0])**2 + (g-drgb[1])**2 + (b-drgb[2])**2
-        if d < best_d:
-            best_d = d
-            best = (code, name, rgb_to_hex(drgb), int(math.sqrt(d)))
-    assert best is not None
-    return best  # type: ignore
+def knit_aspect_resize(img: Image.Image, stitches_w: int, row_aspect: float = 0.8) -> Image.Image:
+    """Knitting charts: cells look shorter than wide; compress rows for preview."""
+    resized = resize_for_stitch_width(img, stitches_w)
+    w, h = resized.size
+    preview_h = max(1, int(round(h * row_aspect)))
+    return resized.resize((w, preview_h), Image.Resampling.NEAREST)
 
-# ----------------- Inline UI -----------------
+# ---------------------- embroidery helpers ----------------------
+def to_monochrome(img: Image.Image, threshold: int = 180) -> Image.Image:
+    gray = img.convert("L")
+    bw = gray.point(lambda p: 255 if p > threshold else 0, mode="1")
+    return bw.convert("L")
 
-INDEX_HTML = """
-<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }}</title>
-<meta name="description" content="{{ desc }}">
-<meta property="og:title" content="{{ title }}">
-<meta property="og:description" content="{{ desc }}">
-<meta property="og:type" content="website">
-<meta property="og:url" content="{{ url }}">
-<script type="application/ld+json">
-{{ jsonld }}
-</script>
-<style>
-:root{ --fg:#111; --muted:#666; --accent:#e4006d; --line:#eee; --card:#fafafa; --radius:14px; --wrap:1100px; }
-*{box-sizing:border-box} html{scroll-behavior:smooth} html,body{margin:0;padding:0}
-body{font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--fg);background:#fff}
-.wrap{max-width:var(--wrap);margin:0 auto;padding:20px}
-header{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);z-index:5}
-.brand{font-weight:800;letter-spacing:.2px}
-.hero h1{font-size:40px;margin:12px 0 4px;letter-spacing:-.3px}
-.badge{display:inline-block;background:#ffe6f3;color:#bb0055;border:1px solid #ffd6ec;border-radius:999px;padding:4px 10px;font-weight:700;margin-bottom:8px}
-.sub{color:var(--muted);margin:0 0 16px}
-.grid{display:grid;gap:16px}
-.controls{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;transition:transform .35s ease, font-size .35s ease}
-label{display:block;font-weight:600;margin-bottom:6px}
-input[type=file],input[type=number],input[type=checkbox],button,select{font:inherit}
-input[type=number]{width:120px;padding:8px;border:1px solid var(--line);border-radius:8px}
-.row{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-.btn{display:inline-block;padding:10px 16px;border-radius:999px;border:1px solid var(--accent);background:var(--accent);color:#fff;text-decoration:none;font-weight:700;cursor:pointer}
-.btn.ghost{background:transparent;color:var(--accent)}
-.preview{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}
-.preview img{width:100%;height:auto;border-radius:12px;border:1px solid var(--line);background:#fff}
-.palette{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
-.swatch{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fff}
-.swatch .box{width:20px;height:20px;border-radius:4px;border:1px solid #ddd}
-.small{font-size:14px;color:var(--muted)}
-footer{border-top:1px solid var(--line);margin-top:16px}
-@media (max-width:900px){ .preview{grid-template-columns:1fr} .controls{grid-template-columns:1fr}}
-/* Emphasis on HOW section while in view */
-#how .card h3{transition:font-size .35s ease}
-#how .card ol, #how .card p{transition:font-size .35s ease}
-body.how-active #how .card{transform:scale(1.04)}
-body.how-active #how .card h3{font-size:1.6rem}
-body.how-active #how .card ol, body.how-active #how .card p{font-size:1.05rem}
-</style>
+def serpentine_points(bw: Image.Image, step: int = 3) -> List[Tuple[int,int]]:
+    """Naive run-stitch path by row scanning; good for simple outlines."""
+    w, h = bw.size
+    pts: List[Tuple[int,int]] = []
+    data = bw.load()
+    for y in range(0, h, step):
+        xs = range(0, w, step) if (y // step) % 2 == 0 else range(w-1, -1, -step)
+        row_pts = [(x, y) for x in xs if data[x, y] < 128]
+        if row_pts:
+            if pts and pts[-1] != row_pts[0]:
+                pts.append(row_pts[0])  # jump
+            pts.extend(row_pts)
+    return pts
 
-<header>
-  <div class="wrap row" style="justify-content:space-between">
-    <div class="brand">StitchBitch.club</div>
-    <nav class="row">
-      <a class="btn ghost" id="howLink" href="#how">How it works</a>
-      <a class="btn" href="#tool">Open the tool</a>
-    </nav>
-  </div>
-</header>
+def write_embroidery_outputs(paths: List[Tuple[int,int]], scale: float = 1.0) -> Dict[str, bytes]:
+    """Emit DST/PES if pyembroidery is available; always emit SVG polyline."""
+    out: Dict[str, bytes] = {}
+    if paths:
+        svg_points = " ".join([f"{int(x*scale)},{int(y*scale)}" for x, y in paths])
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {int(paths[-1][0]*scale+10)} {int(paths[-1][1]*scale+10)}"><polyline fill="none" stroke="black" stroke-width="1" points="{svg_points}"/></svg>'
+        out["embroidery.svg"] = svg.encode("utf-8")
+    if HAS_PYEMB and paths:
+        pat = EmbPattern()
+        last: Optional[Tuple[int,int]] = None
+        for (x, y) in paths:
+            if last is None:
+                pat.add_stitch_absolute(0, 0, 2)  # move
+            pat.add_stitch_absolute(x, y)
+            last = (x, y)
+        pat.end()
+        buf_dst = io.BytesIO(); write_dst(pat, buf_dst); out["pattern.dst"] = buf_dst.getvalue()
+        buf_pes = io.BytesIO(); write_pes(pat, buf_pes); out["pattern.pes"] = buf_pes.getvalue()
+    return out
 
-<section class="wrap hero">
-  <div class="badge">Free tool — no sign‑up</div>
-  <h1>Turn any image into a stitch‑ready pattern.</h1>
-  <p class="sub">Grid + numbering, palette, fabric sizes, and a printable PDF. Always free.</p>
-  <div class="row">
-    <a class="btn" href="#tool">Start free</a>
-    <button class="btn ghost" id="shareBtn" title="Share this tool">Share</button>
-  </div>
-</section>
+# ---------------------- HTTP ----------------------
+@app.get("/health")
+def health() -> dict:
+    return {"ok": True}
 
-<section id="tool" class="wrap grid">
-  <div class="card controls">
-    <div>
-      <label>Image</label>
-      <input id="file" type="file" accept="image/*" />
-      <p class="small">Tip: width 80–160 and 8–16 colors often look best.</p>
-    </div>
-    <div class="row">
-      <div><label>Width (px)</label><input id="width" type="number" min="20" max="1200" value="140"></div>
-      <div><label>Colors</label><input id="colors" type="number" min="2" max="64" value="12"></div>
-      <div><label>Grid cell (px)</label><input id="grid_px" type="number" min="4" max="40" value="10"></div>
-      <div>
-        <label>&nbsp;</label>
-        <label class="row"><input id="dither" type="checkbox"> Dither</label>
-        <label class="row"><input id="grid_on" type="checkbox" checked> Show grid</label>
-        <label class="row"><input id="numbers_on" type="checkbox" checked> Numbers</label>
-        <label class="row"><input id="use_dmc" type="checkbox"> DMC approx</label>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn" id="previewBtn">Preview</button>
-        <button class="btn ghost" id="downloadZipBtn" disabled>Download ZIP</button>
-        <button class="btn ghost" id="downloadPdfBtn" disabled>Download PDF</button>
-      </div>
-    </div>
-  </div>
+@app.errorhandler(413)
+def too_large(_e):
+    return jsonify({"error": "file_too_large", "limit_mb": 25}), 413
 
-  <div class="preview">
-    <div class="card">
-      <img id="preview" alt="Preview appears here">
-      <div class="small" id="meta"></div>
-      <div id="fabric" class="small"></div>
-    </div>
-    <div class="card">
-      <img id="legend" alt="Palette legend" style="margin-bottom:12px">
-      <div id="palette" class="palette"></div>
-    </div>
-  </div>
-</section>
-
-<section id="how" class="wrap">
-  <div class="card">
-    <h3>How it works</h3>
-    <ol>
-      <li>Upload an image. We resize to your width.</li>
-      <li>We reduce colors to your palette count.</li>
-      <li>We add a stitch grid and 10×10 numbering.</li>
-      <li>Download a ZIP or a printable PDF with palette and sizes.</li>
-    </ol>
-    <p class="small">Private by default. Files are processed in memory and returned to you.</p>
-  </div>
-</section>
-
-<footer class="wrap small">
-  <div class="row" style="justify-content:space-between">
-    <div>Banter, not bait. Opt‑in energy only.</div>
-    <div>© StitchBitch.club</div>
-  </div>
-</footer>
-
-<script>
-const fileEl = document.getElementById('file');
-const widthEl = document.getElementById('width');
-const colorsEl = document.getElementById('colors');
-const gridPxEl = document.getElementById('grid_px');
-const ditherEl = document.getElementById('dither');
-const gridOnEl = document.getElementById('grid_on');
-const numbersOnEl = document.getElementById('numbers_on');
-const useDmcEl = document.getElementById('use_dmc');
-
-const previewImg = document.getElementById('preview');
-const legendImg = document.getElementById('legend');
-const paletteBox = document.getElementById('palette');
-const meta = document.getElementById('meta');
-const fabricBox = document.getElementById('fabric');
-
-const previewBtn = document.getElementById('previewBtn');
-const downloadZipBtn = document.getElementById('downloadZipBtn');
-const downloadPdfBtn = document.getElementById('downloadPdfBtn');
-
-const howSection = document.getElementById('how');
-const toolSection = document.getElementById('tool');
-const howLink = document.getElementById('howLink');
-const shareBtn = document.getElementById('shareBtn');
-
-// Smooth scroll link
-howLink.addEventListener('click', (e)=>{ e.preventDefault(); howSection.scrollIntoView({behavior:'smooth', block:'start'}); });
-
-// Emphasis toggle while HOW is in view
-function updateHowEmphasis(){
-  const vh = window.innerHeight || document.documentElement.clientHeight;
-  const how = howSection.getBoundingClientRect();
-  const tool = toolSection.getBoundingClientRect();
-  const howInView = (how.top < vh*0.66) && (how.bottom > vh*0.34);
-  const nearTool = tool.top < vh*0.5;
-  document.body.classList.toggle('how-active', howInView && !nearTool);
-}
-window.addEventListener('scroll', updateHowEmphasis, {passive:true});
-window.addEventListener('resize', updateHowEmphasis);
-document.addEventListener('DOMContentLoaded', updateHowEmphasis);
-
-// Share button (growth loop)
-shareBtn.addEventListener('click', async ()=>{
-  const text = "Free stitch pattern maker: grid, numbering, PDF, palette. Try it:";
-  const url = location.origin + location.pathname + "#tool";
-  if (navigator.share) {
-    try { await navigator.share({title: document.title, text, url}); } catch(e){}
-  } else {
-    await navigator.clipboard.writeText(text + " " + url);
-    alert("Link copied. Share anywhere.");
-  }
-});
-
-// Build form
-function buildForm(endpoint){
-  const fd = new FormData();
-  if(!fileEl.files[0]) { alert("Choose an image first."); return null; }
-  fd.append('file', fileEl.files[0]);
-  fd.append('width', widthEl.value);
-  fd.append('colors', colorsEl.value);
-  fd.append('grid_px', gridPxEl.value);
-  fd.append('dither', ditherEl.checked ? "1" : "0");
-  fd.append('grid_on', gridOnEl.checked ? "1" : "0");
-  fd.append('numbers_on', numbersOnEl.checked ? "1" : "0");
-  fd.append('use_dmc', useDmcEl.checked ? "1" : "0");
-  return {url:endpoint, fd:fd};
-}
-
-// Preview
-previewBtn.addEventListener('click', async (e)=>{
-  e.preventDefault();
-  const req = buildForm('/api/preview');
-  if(!req) return;
-  previewBtn.disabled = true;
-  try{
-    const r = await fetch(req.url, {method:'POST', body:req.fd});
-    if(!r.ok){ const t = await r.text(); throw new Error(t); }
-    const data = await r.json();
-    previewImg.src = data.preview_png;
-    legendImg.src = data.legend_png;
-    meta.textContent = `Pattern: ${data.width} × ${data.height} stitches • Colors: ${data.colors_used} • Stitches: ${data.stitches}`;
-    // Fabric sizes
-    fabricBox.innerHTML = data.fabric.map(f =>
-      `Aida ${f.count}: finished ${f.finished_in[0]}″ × ${f.finished_in[1]}″ • cut ${f.cut_in[0]}″ × ${f.cut_in[1]}″`
-    ).join("<br>");
-    // Palette
-    paletteBox.innerHTML = '';
-    for(const sw of data.palette){
-      const right = data.dmc && data.dmc[sw.hex] ? `<br><span class="small">DMC ${data.dmc[sw.hex].code} — ${data.dmc[sw.hex].name}</span>` : '';
-      const div = document.createElement('div');
-      div.className = 'swatch';
-      div.innerHTML = `<div class="box" style="background:${sw.hex}"></div><div><strong>${sw.hex}</strong><br><span class="small">${sw.count} px</span>${right}</div>`;
-      paletteBox.appendChild(div);
-    }
-    downloadZipBtn.disabled = false;
-    downloadPdfBtn.disabled = false;
-  }catch(err){
-    alert("Preview error: " + err.message);
-  }finally{
-    previewBtn.disabled = false;
-  }
-});
-
-// Downloads
-async function doDownload(endpoint, filename){
-  const req = buildForm(endpoint);
-  if(!req) return;
-  try{
-    const r = await fetch(req.url, {method:'POST', body:req.fd});
-    if(!r.ok){ const t = await r.text(); throw new Error(t); }
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  }catch(err){
-    alert("Download error: " + err.message);
-  }
-}
-downloadZipBtn.addEventListener('click', e => { e.preventDefault(); doDownload('/api/download_zip', 'stitchbitch_pattern.zip'); });
-downloadPdfBtn.addEventListener('click', e => { e.preventDefault(); doDownload('/api/download_pdf', 'stitchbitch_pattern.pdf'); });
-</script>
-"""
-
-# ----------------- Core request processing -----------------
-
-def _parse_bool(v: str | None, default: bool=False) -> bool:
-    if v is None: return default
-    return v in ("1","true","True","YES","yes","on")
-
-def _process_from_request():
-    f = request.files.get("file")
-    if not f or f.filename == "":
-        abort(400, "no file uploaded")
-    try:
-        width = int(request.form.get("width", "140"))
-        colors = int(request.form.get("colors", "12"))
-        grid_px = int(request.form.get("grid_px", "10"))
-        dither = _parse_bool(request.form.get("dither"), False)
-        grid_on = _parse_bool(request.form.get("grid_on"), True)
-        numbers_on = _parse_bool(request.form.get("numbers_on"), True)
-        use_dmc = _parse_bool(request.form.get("use_dmc"), False)
-    except ValueError:
-        abort(400, "bad parameters")
-
-    original = _to_rgb(Image.open(f.stream))
-    resized = resize_image(original, width)
-    quant = quantize_image(resized, colors, dither=dither)
-    with_grid = draw_grid_numbered(quant, grid_px, show_numbers=numbers_on) if grid_on else quant.copy()
-
-    pc = palette_counts(quant)
-    pairs = sorted_palette(pc)
-
-    # DMC mapping (approx)
-    dmc_map: Dict[str, Dict[str,str]] = {}
-    if use_dmc:
-        for rgb, _ in pairs:
-            code, name, hx, _d = nearest_dmc(rgb)
-            dmc_map[rgb_to_hex(rgb)] = {"code": code, "name": name, "hex": hx}
-
-    return original, resized, quant, with_grid, pairs, dmc_map
-
-# ----------------- Routes -----------------
+@app.errorhandler(Exception)
+def on_error(_e):
+    return make_response(jsonify({"error": "server_error"}), 500)
 
 @app.get("/")
 def index() -> str:
-    jsonld = {
-      "@context":"https://schema.org",
-      "@type":"SoftwareApplication",
-      "name":"StitchBitch Pattern Maker",
-      "applicationCategory":"GraphicsApplication",
-      "operatingSystem":"Web",
-      "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
-      "description": SITE_DESC,
-      "url": SITE_URL,
-    }
-    return render_template_string(INDEX_HTML,
-        title=SITE_TITLE, desc=SITE_DESC, url=SITE_URL, jsonld=json.dumps(jsonld))
+    return f"""<!doctype html><meta charset="utf-8">
+<title>StitchBitch — Pattern Tools</title>
+<body style="font-family:sans-serif;max-width:820px;margin:32px auto;line-height:1.45">
+<h2>StitchBitch — Pattern Tools</h2>
+<p>Upload an image and choose a pattern type. One free export/day. For machine files, install <code>pyembroidery</code> on the server or use the SVG fallback.</p>
+<form method="POST" action="/api/convert" enctype="multipart/form-data">
+  <p><input type="file" name="file" accept="image/*" required></p>
 
-@app.post("/api/preview")
-def api_preview():
-    original, resized, quant, with_grid, pairs, dmc_map = _process_from_request()
-    legend = legend_strip(pairs, with_grid.width)
-    data = {
-        "width": quant.width,
-        "height": quant.height,
-        "stitches": quant.width * quant.height,
-        "colors_used": min(64, len(pairs)),
-        "preview_png": data_url(with_grid),
-        "legend_png": data_url(legend),
-        "palette": [{"hex": rgb_to_hex(rgb), "count": n} for rgb, n in pairs[:64]],
-        "fabric": fabric_sizes(quant.width, quant.height),
-        "dmc": dmc_map or None
-    }
-    return jsonify(data)
+  <fieldset style="border:1px solid #ddd;padding:12px"><legend>Pattern Type</legend>
+    <label><input type="radio" name="ptype" value="cross" checked> Cross-stitch</label>
+    <label style="margin-left:16px"><input type="radio" name="ptype" value="knit"> Knitting (colorwork)</label>
+    <label style="margin-left:16px"><input type="radio" name="ptype" value="emb"> Embroidery (run-stitch)</label>
+  </fieldset>
 
-@app.post("/api/download_zip")
-def api_download_zip():
-    original, resized, quant, with_grid, pairs, dmc_map = _process_from_request()
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("original.png", png_bytes(original))
-        z.writestr("resized.png", png_bytes(resized))
-        z.writestr("quantized.png", png_bytes(quant))
-        z.writestr("with_grid.png", png_bytes(with_grid))
-        # palette CSV
-        csv_lines = ["hex,count"]
-        for rgb, n in pairs:
-            csv_lines.append(f"{rgb_to_hex(rgb)},{n}")
-        z.writestr("palette.csv", "\n".join(csv_lines).encode("utf-8"))
-        # dmc CSV if requested
-        if dmc_map:
-            dmc_lines = ["orig_hex,dmc_code,dmc_name,dmc_hex"]
-            for hx, meta in dmc_map.items():
-                dmc_lines.append(f"{hx},{meta['code']},{meta['name']},{meta['hex']}")
-            z.writestr("palette_dmc_approx.csv", "\n".join(dmc_lines).encode("utf-8"))
-        # README
-        readme = (
-            "StitchBitch Pattern Pack (Free)\n"
-            f"Size: {quant.width} x {quant.height} stitches\n"
-            f"Colors used: {min(64, len(pairs))}\n"
-            "Files:\n"
-            "- original.png (normalized RGB)\n"
-            "- resized.png (requested width)\n"
-            "- quantized.png (reduced palette)\n"
-            "- with_grid.png (grid + 10x10 numbering)\n"
-            "- palette.csv (hex + counts)\n"
-        )
-        if dmc_map:
-            readme += "- palette_dmc_approx.csv (nearest DMC approximation; not official)\n"
-        z.writestr("README.txt", readme.encode("utf-8"))
-    mem.seek(0)
-    return send_file(mem, mimetype="application/zip", as_attachment=True, download_name="stitchbitch_pattern.zip")
+  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px">
+    <label>Width (stitches) <input type="number" name="width" value="120" min="20" max="400" required></label>
+    <label>Max colors <input type="number" name="colors" value="16" min="2" max="60" required></label>
+    <label>Cloth count (st/in) <input type="number" name="count" value="14" min="10" max="22" required></label>
+    <label>Strands <input type="number" name="strands" value="2" min="1" max="6" required></label>
+    <label>Waste % <input type="number" name="waste" value="20" min="0" max="60" required></label>
+  </div>
 
-@app.post("/api/download_pdf")
-def api_download_pdf():
-    """Generate a 1‑page printable PDF with the chart, legend, and basics."""
-    original, resized, quant, with_grid, pairs, dmc_map = _process_from_request()
-    # Compose an 8.5x11 inch page at 200 DPI to keep memory low
-    DPI = 200
-    page_w, page_h = int(8.5*DPI), int(11*DPI)
-    page = Image.new("RGB", (page_w, page_h), "white")
-    draw = ImageDraw.Draw(page)
+  <p><label><input type="checkbox" name="symbols" checked> Add symbol chart overlay</label>
+     <label style="margin-left:16px"><input type="checkbox" name="pdf" checked> Also export single-page PDF</label></p>
 
-    # Title
-    title = "StitchBitch Pattern"
-    draw.text((int(0.5*DPI), int(0.4*DPI)), title, fill=(0,0,0))
-    meta = f"{quant.width}×{quant.height} stitches • colors: {min(64,len(pairs))}"
-    draw.text((int(0.5*DPI), int(0.7*DPI)), meta, fill=(0,0,0))
+  <fieldset style="border:1px solid #ddd;padding:12px"><legend>Embroidery Options</legend>
+    <p style="margin:0 0 8px 0;font-size:12px;opacity:.8">Simple run-stitch from image; for full digitizing use your toolchain or Ink/Stitch.</p>
+    <label>Threshold <input type="number" name="emb_thresh" value="180" min="0" max="255"></label>
+    <label style="margin-left:16px">Step px <input type="number" name="emb_step" value="3" min="1" max="10"></label>
+  </fieldset>
 
-    # Fit chart in left column
-    max_chart_w = int(5.5*DPI)
-    max_chart_h = int(7.5*DPI)
-    chart = with_grid
-    scale = min(max_chart_w/chart.width, max_chart_h/chart.height, 1.0)
-    chart_resized = chart.resize((int(chart.width*scale), int(chart.height*scale)), Image.Resampling.NEAREST)
-    page.paste(chart_resized, (int(0.5*DPI), int(1.2*DPI)))
+  <button type="submit">Generate ZIP</button>
+</form>
+<p style="font-size:12px;opacity:.7">Cross/Knit outputs: grid.png, legend.csv, meta.json, optional pattern.pdf. Embroidery: pattern.dst/pattern.pes (if available) and embroidery.svg.</p>
+</body>"""
 
-    # Legend and palette on right
-    right_x = int(6.3*DPI)
-    y = int(1.2*DPI)
-    legend = legend_strip(pairs, width=int(1.6*DPI))
-    page.paste(legend, (right_x, y)); y += legend.height + int(0.2*DPI)
+@app.post("/api/convert")
+def convert():
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"error": "missing_file"}), 400
+    ctype = (file.mimetype or "").lower()
+    if ctype not in ALLOWED_MIME:
+        return jsonify({"error": "unsupported_type", "got": ctype}), 400
 
-    # Palette swatches (up to 40)
-    for rgb, n in pairs[:40]:
-        sw = Image.new("RGB", (int(0.3*DPI), int(0.3*DPI)), rgb)
-        page.paste(sw, (right_x, y))
-        label = f"{rgb_to_hex(rgb)}  {n} px"
-        if dmc_map and rgb_to_hex(rgb) in dmc_map:
-            dm = dmc_map[rgb_to_hex(rgb)]
-            label += f"  DMC {dm['code']} {dm['name']}"
-        draw.text((right_x + int(0.35*DPI), y + 2), label, fill=(0,0,0))
-        y += int(0.35*DPI)
+    try:
+        ptype = request.form.get("ptype", "cross")
+        stitch_w = clamp(int(request.form.get("width", 120)), 20, 400)
+        max_colors = clamp(int(request.form.get("colors", 16)), 2, 60)
+        cloth_count = clamp(int(request.form.get("count", 14)), 10, 22)
+        strands = clamp(int(request.form.get("strands", 2)), 1, 6)
+        waste_pct = clamp(int(request.form.get("waste", 20)), 0, 60)
+        want_symbols = request.form.get("symbols") is not None
+        want_pdf = request.form.get("pdf") is not None
+        emb_thresh = clamp(int(request.form.get("emb_thresh", 180)), 0, 255)
+        emb_step = clamp(int(request.form.get("emb_step", 3)), 1, 10)
+    except Exception:
+        return jsonify({"error": "invalid_parameters"}), 400
 
-    # Fabric sizes
-    y += int(0.3*DPI)
-    draw.text((right_x, y), "Fabric sizes (Aida):", fill=(0,0,0)); y += int(0.2*DPI)
-    for f in fabric_sizes(quant.width, quant.height):
-        line = f"{f['count']} ct  finished {f['finished_in'][0]}\"×{f['finished_in'][1]}\"  cut {f['cut_in'][0]}\"×{f['cut_in'][1]}\""
-        draw.text((right_x, y), line, fill=(0,0,0)); y += int(0.18*DPI)
+    try:
+        base = open_image(file)
+    except Exception:
+        return jsonify({"error": "decode_failed"}), 400
+    if max(base.size) > MAX_DIM:
+        return jsonify({"error": "image_too_large", "max_dim": MAX_DIM}), 400
 
-    # Export single-page PDF
-    buf = io.BytesIO()
-    page.save(buf, format="PDF", resolution=200.0)
-    buf.seek(0)
-    return send_file(buf, mimetype="application/pdf", as_attachment=True, download_name="stitchbitch_pattern.pdf")
+    out_zip = io.BytesIO()
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        if ptype in ("cross", "knit"):
+            small = resize_for_stitch_width(base, stitch_w) if ptype == "cross" else knit_aspect_resize(base, stitch_w, 0.8)
+            quant = quantize(small, max_colors)
+            counts = palette_counts(quant)
+            sx, sy = quant.size
 
-# ----------------- Entrypoint -----------------
+            finished_w_in = round(sx / float(cloth_count), 2)
+            finished_h_in = round(sy / float(cloth_count), 2)
+
+            grid_img = draw_grid(quant, cell_px=CELL_PX)
+            pdf_bytes: Optional[bytes] = None
+            if want_symbols or want_pdf:
+                pal = sorted(counts.keys(), key=lambda c: counts[c], reverse=True)
+                sym_map = assign_symbols(pal)
+                sym_img = draw_symbols_on_grid(quant, cell_px=CELL_PX, sym_map=sym_map)
+                if want_pdf:
+                    buf = io.BytesIO()
+                    sym_img.convert("RGB").save(buf, format="PDF", resolution=300.0)
+                    pdf_bytes = buf.getvalue()
+                grid_img = sym_img
+
+            # legend.csv
+            total = sum(counts.values()) or 1
+            lines = ["hex,r,g,b,stitches,percent,skeins_est"]
+            for (r,g,b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+                skeins = skeins_per_color(c, cloth_count, strands, waste_pct/100.0)
+                lines.append(f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total):.2f},{skeins:.2f}")
+            z.writestr("legend.csv", ("\n".join(lines)).encode("utf-8"))
+
+            meta = {
+                "type": ptype,
+                "stitches_w": sx, "stitches_h": sy, "colors": len(counts),
+                "cloth_count": cloth_count, "strands": strands, "waste_percent": waste_pct,
+                "finished_size_in": [finished_w_in, finished_h_in],
+                "notes": "Knitting preview compresses row height visually; verify gauge."
+            }
+            z.writestr("meta.json", json.dumps(meta, indent=2))
+
+            buf_png = io.BytesIO()
+            grid_img.save(buf_png, format="PNG")
+            z.writestr("grid.png", buf_png.getvalue())
+            if pdf_bytes:
+                z.writestr("pattern.pdf", pdf_bytes)
+
+        elif ptype == "emb":
+            small = resize_for_stitch_width(base, stitch_w)
+            bw = to_monochrome(small, threshold=emb_thresh)
+            pts = serpentine_points(bw, step=emb_step)
+            for name, data in write_embroidery_outputs(pts, scale=1.0).items():
+                z.writestr(name, data)
+            z.writestr("meta.json", json.dumps({"type": "emb", "points": len(pts), "pyembroidery": HAS_PYEMB}, indent=2))
+        else:
+            return jsonify({"error": "unknown_ptype"}), 400
+
+    out_zip.seek(0)
+    fname = f"pattern_{request.form.get('ptype','cross')}.zip"
+    return send_file(out_zip, mimetype="application/zip", as_attachment=True, download_name=fname)
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # For local dev; on Render use: gunicorn app:app --bind 0.0.0.0:$PORT
+    app.run(host="127.0.0.1", port=5050)

@@ -1,3 +1,4 @@
-Flask>=3.0,<4
-Pillow>=10.0,<11
-gunicorn>=21,<22
+flask
+pillow
+# Optional for direct .dst/.pes output; otherwise SVG fallback is used:
+# pyembroidery
