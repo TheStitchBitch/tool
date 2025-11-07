@@ -1,4 +1,6 @@
-flask
-pillow
+#####Requirements#####
+flask==3.1.2
+pillow==12.0.0
+gunicorn
 # Optional for direct .dst/.pes output; otherwise SVG fallback is used:
 # pyembroidery
