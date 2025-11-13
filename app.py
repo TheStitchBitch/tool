@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 import io
 import json
@@ -327,7 +325,8 @@ def convert():
 
     # paywall: 1 free export per day
     if not can_use_free_export():
-        return redirect(url_for("pricing"))
+        # add ?reason=limit so pricing page can show a popup
+        return redirect(url_for("pricing", reason="limit"))
 
     out_zip = io.BytesIO()
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
@@ -437,25 +436,34 @@ HOMEPAGE_HTML = r"""
 :root{
   --bg:#F7F4EF;--fg:#222;--muted:#6b6b6b;
   --line:#e8e4de;--radius:14px;--shadow:0 6px 20px rgba(0,0,0,.08);
+  --accent:#4C7CF3;
 }
-body{margin:0;background:var(--bg);color:var(--fg);
+body{margin:0;background:linear-gradient(135deg,#f9f6ef,#f1f4ff);color:var(--fg);
      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter}
-.wrap{max-width:880px;margin:0 auto;padding:24px 16px 40px}
-h1{font-size:2.1rem;margin:0 0 6px}
+.wrap{max-width:960px;margin:0 auto;padding:24px 16px 40px}
+h1{font-size:2.3rem;margin:0 0 6px}
+h2{margin:0 0 10px}
 .card{background:#fff;border-radius:var(--radius);
       border:1px solid var(--line);box-shadow:var(--shadow);padding:18px}
-.hero{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:18px}
-.hero-text{flex:1 1 260px}
+.hero{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:24px;align-items:center}
+.hero-text{flex:1 1 280px}
 .muted{color:var(--muted);font-size:13px}
-.pill{padding:8px 14px;border-radius:999px;background:#222;color:#fff;border:none;cursor:pointer}
+.pill{padding:9px 16px;border-radius:999px;background:var(--accent);color:#fff;
+      border:none;cursor:pointer;font-size:14px}
+.pill-secondary{background:#fff;color:var(--fg);border:1px solid var(--line)}
 .file{border:2px dashed var(--line);border-radius:var(--radius);
-      padding:12px;display:flex;align-items:center;gap:10px;cursor:pointer}
+      padding:12px;display:flex;align-items:center;gap:10px;cursor:pointer;background:#faf8f2}
 .file input{display:none}
 fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0}
 legend{font-size:13px}
 .row{display:flex;flex-wrap:wrap;gap:12px}
 .row > label{flex:1 1 150px}
 .hidden{display:none}
+.features{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:24px}
+.feature-title{font-weight:600;margin-bottom:4px}
+@media (max-width:720px){
+  .hero{flex-direction:column}
+}
 </style>
 </head>
 <body>
@@ -465,21 +473,41 @@ legend{font-size:13px}
   <div class="hero-text">
     <h1>Turn art into stitchable patterns</h1>
     <p class="muted">
-      Cross-stitch grids, knitting charts, and embroidery machine files —
-      wrapped in a clean PatternCraft workflow.
+      PatternCraft converts your artwork into cross-stitch grids, knitting charts,
+      and embroidery machine files in seconds.
     </p>
-    <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
-      Try it free ↓
-    </button>
+    <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+      <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
+        Try free
+      </button>
+      <button class="pill pill-secondary" onclick="location.href='#how'">
+        How it works
+      </button>
+    </div>
   </div>
-  <div class="card" style="flex:1 1 260px">
-    <h3 style="margin-top:0">What you get</h3>
-    <ul class="muted">
+  <div class="card" style="flex:1 1 280px">
+    <h2 style="margin-top:0;font-size:1.1rem">What you get</h2>
+    <ul class="muted" style="padding-left:18px">
       <li>grid.png with bold 10×10 guides</li>
       <li>legend.csv with colors & skein estimates</li>
       <li>meta.json with sizing + settings</li>
-      <li>pattern.pdf or machine files</li>
+      <li>pattern.pdf or embroidery files</li>
     </ul>
+  </div>
+</div>
+
+<div id="how" class="features">
+  <div class="card">
+    <div class="feature-title">Cross-stitch</div>
+    <p class="muted">Upload art, pick size and colors, get a clean grid with symbols and floss estimates.</p>
+  </div>
+  <div class="card">
+    <div class="feature-title">Knitting charts</div>
+    <p class="muted">Generate colorwork charts with realistic row aspect and multiple stitch styles.</p>
+  </div>
+  <div class="card">
+    <div class="feature-title">Embroidery</div>
+    <p class="muted">Create run-stitch paths and export embroidery-friendly files or SVG for further editing.</p>
   </div>
 </div>
 
@@ -532,7 +560,7 @@ legend{font-size:13px}
 
     <fieldset id="embBlock" class="hidden">
       <legend>Embroidery options</legend>
-      <p class="muted">Simple run-stitch path from your art. For full digitizing, use your usual machine tools.</p>
+      <p class="muted">Simple run-stitch path from your image. For advanced digitizing, continue in your usual embroidery software.</p>
       <div class="row">
         <label>Threshold
           <input type="number" name="emb_thresh" value="180" min="0" max="255">
@@ -543,9 +571,9 @@ legend{font-size:13px}
       </div>
     </fieldset>
 
-    <div style="margin-top:10px">
+    <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button class="pill" type="submit">Generate ZIP</button>
-      <span class="muted">1 export per day free. More = upgrade.</span>
+      <span class="muted">1 export per day free. Upgrade on demand.</span>
     </div>
   </form>
 </div>
@@ -659,10 +687,20 @@ h1{margin-top:0}
     </div>
   </div>
 </div>
+
+<script>
+  (function () {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('reason') === 'limit') {
+      alert('You used your free PatternCraft export for today. Upgrade to keep generating patterns.');
+    }
+  }());
+</script>
+
 </body>
 </html>
 """
 
 if __name__ == "__main__":
-    # Local dev; on Render use gunicorn start command
+    # local dev; on Render use gunicorn start command
     app.run(host="127.0.0.1", port=5050, debug=True)
