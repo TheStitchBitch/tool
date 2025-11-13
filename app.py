@@ -436,11 +436,11 @@ HOMEPAGE_HTML = r"""
 :root{
   --bg:#F7F4EF;--fg:#222;--muted:#6b6b6b;
   --line:#e8e4de;--radius:14px;--shadow:0 6px 20px rgba(0,0,0,.08);
-  --accent:#4C7CF3;
+  --accent:#4C7CF3;--accent-soft:#e3ebff;
 }
 body{margin:0;background:linear-gradient(135deg,#f9f6ef,#f1f4ff);color:var(--fg);
      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter}
-.wrap{max-width:960px;margin:0 auto;padding:24px 16px 40px}
+.wrap{max-width:980px;margin:0 auto;padding:24px 16px 40px}
 h1{font-size:2.3rem;margin:0 0 6px}
 h2{margin:0 0 10px}
 .card{background:#fff;border-radius:var(--radius);
@@ -451,16 +451,35 @@ h2{margin:0 0 10px}
 .pill{padding:9px 16px;border-radius:999px;background:var(--accent);color:#fff;
       border:none;cursor:pointer;font-size:14px}
 .pill-secondary{background:#fff;color:var(--fg);border:1px solid var(--line)}
-.file{border:2px dashed var(--line);border-radius:var(--radius);
-      padding:12px;display:flex;align-items:center;gap:10px;cursor:pointer;background:#faf8f2}
+.features{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:24px}
+.feature-title{font-weight:600;margin-bottom:4px}
+.make-layout{display:flex;gap:20px;flex-wrap:wrap}
+.make-main{flex:1 1 260px}
+.make-sample{flex:1 1 220px;display:flex;flex-direction:column;gap:8px}
+.sample-box{border-radius:12px;border:1px dashed var(--line);
+            background:repeating-linear-gradient(
+               90deg, #f4f2ec 0, #f4f2ec 9px, #e0ddd6 10px),
+                       repeating-linear-gradient(
+               180deg, #f4f2ec 0, #f4f2ec 9px, #e0ddd6 10px);
+            background-blend-mode:multiply;
+            aspect-ratio:4/3;position:relative;overflow:hidden}
+.sample-overlay{position:absolute;inset:10%;display:grid;place-items:center;
+                font-size:11px;color:#333;background:rgba(255,255,255,0.6)}
+.file{border:2px dashed var(--accent);border-radius:18px;
+      padding:18px;display:flex;align-items:center;gap:12px;cursor:pointer;
+      background:var(--accent-soft);transition:background .15s,border-color .15s,transform .1s}
+.file:hover{background:#d9e3ff;border-color:#365ed1;transform:translateY(-1px)}
 .file input{display:none}
+.file-label-main{font-weight:600;font-size:15px}
+.file-label-sub{font-size:12px;color:var(--muted)}
+.free-note{margin-top:6px;font-size:12px;color:#1c5c2f;background:#e1f4e5;
+          border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center;gap:6px}
+.free-dot{width:8px;height:8px;border-radius:999px;background:#1c5c2f}
 fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0}
 legend{font-size:13px}
 .row{display:flex;flex-wrap:wrap;gap:12px}
 .row > label{flex:1 1 150px}
 .hidden{display:none}
-.features{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:24px}
-.feature-title{font-weight:600;margin-bottom:4px}
 @media (max-width:720px){
   .hero{flex-direction:column}
 }
@@ -474,24 +493,24 @@ legend{font-size:13px}
     <h1>Turn art into stitchable patterns</h1>
     <p class="muted">
       PatternCraft converts your artwork into cross-stitch grids, knitting charts,
-      and embroidery machine files in seconds.
+      and embroidery-ready files with one upload.
     </p>
     <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
       <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
-        Try free
+        Upload art
       </button>
       <button class="pill pill-secondary" onclick="location.href='#how'">
-        How it works
+        See what you get
       </button>
     </div>
   </div>
   <div class="card" style="flex:1 1 280px">
-    <h2 style="margin-top:0;font-size:1.1rem">What you get</h2>
+    <h2 style="margin-top:0;font-size:1.1rem">Why PatternCraft</h2>
     <ul class="muted" style="padding-left:18px">
-      <li>grid.png with bold 10×10 guides</li>
-      <li>legend.csv with colors & skein estimates</li>
-      <li>meta.json with sizing + settings</li>
-      <li>pattern.pdf or embroidery files</li>
+      <li>Clean grids with bold 10×10 guides</li>
+      <li>Floss estimates per color for planning</li>
+      <li>Knitting charts that respect row proportions</li>
+      <li>Embroidery outputs ready for your workflow</li>
     </ul>
   </div>
 </div>
@@ -499,7 +518,7 @@ legend{font-size:13px}
 <div id="how" class="features">
   <div class="card">
     <div class="feature-title">Cross-stitch</div>
-    <p class="muted">Upload art, pick size and colors, get a clean grid with symbols and floss estimates.</p>
+    <p class="muted">Upload art, pick size and colors, get a crisp grid with symbols and rough skein estimates.</p>
   </div>
   <div class="card">
     <div class="feature-title">Knitting charts</div>
@@ -507,83 +526,110 @@ legend{font-size:13px}
   </div>
   <div class="card">
     <div class="feature-title">Embroidery</div>
-    <p class="muted">Create run-stitch paths and export embroidery-friendly files or SVG for further editing.</p>
+    <p class="muted">Create run-stitch paths and export embroidery-friendly files or SVG for fine-tuning.</p>
   </div>
 </div>
 
 <div id="make" class="card">
   <h2 style="margin-top:0">Make a pattern</h2>
-  <form method="POST" action="/api/convert" enctype="multipart/form-data">
-    <label class="file">
-      <input type="file" name="file" accept="image/*" required onchange="pickFile(this)">
-      <span id="fname">Choose an image…</span>
-    </label>
+  <div class="make-layout">
+    <div class="make-main">
+      <form method="POST" action="/api/convert" enctype="multipart/form-data">
+        <label class="file">
+          <input type="file" name="file" accept="image/*" required onchange="pickFile(this)">
+          <div>
+            <div class="file-label-main">Upload picture here</div>
+            <div class="file-label-sub">Drop in your artwork or click to browse from your device.</div>
+          </div>
+        </label>
+        <div class="free-note">
+          <div class="free-dot"></div>
+          <span>You have a free pattern conversion available — upload art!</span>
+        </div>
 
-    <fieldset>
-      <legend>Pattern type</legend>
-      <label><input type="radio" name="ptype" value="cross" checked> Cross-stitch</label>
-      <label><input type="radio" name="ptype" value="knit"> Knitting</label>
-      <label><input type="radio" name="ptype" value="emb"> Embroidery</label>
-    </fieldset>
+        <fieldset>
+          <legend>Pattern type</legend>
+          <label><input type="radio" name="ptype" value="cross" checked> Cross-stitch</label>
+          <label><input type="radio" name="ptype" value="knit"> Knitting</label>
+          <label><input type="radio" name="ptype" value="emb"> Embroidery</label>
+        </fieldset>
 
-    <fieldset>
-      <legend>Stitch + size</legend>
-      <div class="row">
-        <label>Stitch width
-          <input type="number" name="width" value="120" min="20" max="400">
-        </label>
-        <label>Max colors
-          <input type="number" name="colors" value="16" min="2" max="60">
-        </label>
-        <label>Stitch style
-          <select id="stitch_style" name="stitch_style"></select>
-        </label>
-      </div>
-    </fieldset>
+        <fieldset>
+          <legend>Stitch + size</legend>
+          <div class="row">
+            <label>Stitch width
+              <input type="number" name="width" value="120" min="20" max="400">
+            </label>
+            <label>Max colors
+              <input type="number" name="colors" value="16" min="2" max="60">
+            </label>
+            <label>Stitch style
+              <select id="stitch_style" name="stitch_style"></select>
+            </label>
+          </div>
+        </fieldset>
 
-    <fieldset id="crossKnitBlock">
-      <legend>Fabric + floss</legend>
-      <div class="row">
-        <label>Cloth count (st/in)
-          <input type="number" name="count" value="14" min="10" max="22">
-        </label>
-        <label>Strands
-          <input type="number" name="strands" value="2" min="1" max="6">
-        </label>
-        <label>Waste %
-          <input type="number" name="waste" value="20" min="0" max="60">
-        </label>
-      </div>
-      <label><input type="checkbox" name="symbols" checked> Symbol overlay</label>
-      <label><input type="checkbox" name="pdf" checked> Also export PDF</label>
-    </fieldset>
+        <fieldset id="crossKnitBlock">
+          <legend>Fabric + floss</legend>
+          <div class="row">
+            <label>Cloth count (st/in)
+              <input type="number" name="count" value="14" min="10" max="22">
+            </label>
+            <label>Strands
+              <input type="number" name="strands" value="2" min="1" max="6">
+            </label>
+            <label>Waste %
+              <input type="number" name="waste" value="20" min="0" max="60">
+            </label>
+          </div>
+          <label><input type="checkbox" name="symbols" checked> Symbol overlay</label>
+          <label><input type="checkbox" name="pdf" checked> Also export PDF</label>
+        </fieldset>
 
-    <fieldset id="embBlock" class="hidden">
-      <legend>Embroidery options</legend>
-      <p class="muted">Simple run-stitch path from your image. For advanced digitizing, continue in your usual embroidery software.</p>
-      <div class="row">
-        <label>Threshold
-          <input type="number" name="emb_thresh" value="180" min="0" max="255">
-        </label>
-        <label>Step px
-          <input type="number" name="emb_step" value="3" min="1" max="10">
-        </label>
-      </div>
-    </fieldset>
+        <fieldset id="embBlock" class="hidden">
+          <legend>Embroidery options</legend>
+          <p class="muted">Simple run-stitch path from your image. For advanced digitizing, continue in your usual embroidery software.</p>
+          <div class="row">
+            <label>Threshold
+              <input type="number" name="emb_thresh" value="180" min="0" max="255">
+            </label>
+            <label>Step px
+              <input type="number" name="emb_step" value="3" min="1" max="10">
+            </label>
+          </div>
+        </fieldset>
 
-    <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <button class="pill" type="submit">Generate ZIP</button>
-      <span class="muted">1 export per day free. Upgrade on demand.</span>
+        <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="pill" type="submit">Generate ZIP</button>
+          <span class="muted">We’ll bundle the grid, legend, meta, and optional PDF into one download.</span>
+        </div>
+      </form>
     </div>
-  </form>
+
+    <div class="make-sample">
+      <div class="muted" style="font-weight:600;">Sample output preview</div>
+      <div class="sample-box">
+        <div class="sample-overlay">
+          <div>
+            <div style="font-weight:600;margin-bottom:4px;">Cross-stitch grid</div>
+            <div>10×10 guides, symbol overlay, printable PDF feel.</div>
+          </div>
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;">
+        Actual downloads include <strong>grid.png</strong>, <strong>legend.csv</strong>, <strong>meta.json</strong>,
+        and optional <strong>pattern.pdf</strong> or embroidery files.
+      </div>
+    </div>
+  </div>
 </div>
 
 </div>
 <script>
 function pickFile(inp){
-  document.getElementById('fname').textContent =
-    inp.files[0]?.name || 'Choose an image…';
+  document.getElementById('fname')?.textContent;
 }
+
 function setStyleOptions(type){
   const sel = document.getElementById('stitch_style');
   sel.innerHTML = '';
@@ -692,7 +738,7 @@ h1{margin-top:0}
   (function () {
     const params = new URLSearchParams(window.location.search);
     if (params.get('reason') === 'limit') {
-      alert('You used your free PatternCraft export for today. Upgrade to keep generating patterns.');
+      alert('You used your free PatternCraft conversion for today. Upgrade to keep generating patterns.');
     }
   }());
 </script>
@@ -702,5 +748,5 @@ h1{margin-top:0}
 """
 
 if __name__ == "__main__":
-    # local dev; on Render use gunicorn start command
+    # local dev; on Render use gunicorn app:app --bind 0.0.0.0:$PORT
     app.run(host="127.0.0.1", port=5050, debug=True)
