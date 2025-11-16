@@ -35,18 +35,16 @@ app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
 CELL_PX = 12
-BOLD_EVERY = 10
-MAX_DIM = 8000  # max width/height in pixels
-FREE_EXPORTS_PER_DAY = 1  # free tier limit
+MAX_DIM = 8000
+FREE_EXPORTS_PER_DAY = 1  # simple daily free limit
 
 
-# ---------------------- UTILITIES ----------------------
+# ---------------------- IMAGE / PATTERN HELPERS ----------------------
 def clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
 def open_image(fs) -> Image.Image:
-    """Open upload and normalize to RGB on white for stable quantization."""
     img = Image.open(fs.stream)
     if img.mode == "RGBA":
         bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -56,7 +54,6 @@ def open_image(fs) -> Image.Image:
 
 
 def resize_for_stitch_width(img: Image.Image, stitch_w: int) -> Image.Image:
-    """Resize while preserving aspect ratio to target stitch width."""
     w, h = img.size
     if max(w, h) > 2000:
         img = img.copy()
@@ -68,7 +65,6 @@ def resize_for_stitch_width(img: Image.Image, stitch_w: int) -> Image.Image:
 
 
 def quantize(img: Image.Image, k: int) -> Image.Image:
-    """Median-cut palette, no dithering for crisp cells."""
     return img.convert(
         "P", palette=Image.Palette.ADAPTIVE, colors=k, dither=Image.Dither.NONE
     ).convert("RGB")
@@ -91,8 +87,7 @@ def luminance(rgb: Tuple[int, int, int]) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def draw_grid(base: Image.Image, cell_px: int, bold_every: int = BOLD_EVERY) -> Image.Image:
-    """Scale each stitch to a cell and overlay a grid (bold every N)."""
+def draw_grid(base: Image.Image, cell_px: int) -> Image.Image:
     sx, sy = base.size
     out = base.resize((sx * cell_px, sy * cell_px), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(out)
@@ -101,20 +96,19 @@ def draw_grid(base: Image.Image, cell_px: int, bold_every: int = BOLD_EVERY) -> 
     for x in range(sx + 1):
         draw.line(
             [(x * cell_px, 0), (x * cell_px, sy * cell_px)],
-            fill=(bold if x % bold_every == 0 else thin),
+            fill=(bold if x % 10 == 0 else thin),
             width=1,
         )
     for y in range(sy + 1):
         draw.line(
             [(0, y * cell_px), (sx * cell_px, y * cell_px)],
-            fill=(bold if y % bold_every == 0 else thin),
+            fill=(bold if y % 10 == 0 else thin),
             width=1,
         )
     return out
 
 
 def assign_symbols(colors: List[Tuple[int, int, int]]) -> Dict[Tuple[int, int, int], str]:
-    """Deterministic symbol per palette color."""
     glyphs = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+*#@&%=?/\\^~<>□■●▲◆★✚")
     return {c: glyphs[i % len(glyphs)] for i, c in enumerate(colors)}
 
@@ -122,7 +116,6 @@ def assign_symbols(colors: List[Tuple[int, int, int]]) -> Dict[Tuple[int, int, i
 def draw_symbols_on_grid(
     base: Image.Image, cell_px: int, sym_map: Dict[Tuple[int, int, int], str]
 ) -> Image.Image:
-    """Overlay symbol per stitch, then grid."""
     sx, sy = base.size
     out = base.resize((sx * cell_px, sy * cell_px), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(out)
@@ -163,7 +156,6 @@ def skeins_per_color(stitches: int, cloth_count: int, strands: int, waste: float
 
 
 def knit_aspect_resize(img: Image.Image, stitches_w: int, row_aspect: float = 0.8) -> Image.Image:
-    """Knitting charts: visually shorter rows."""
     resized = resize_for_stitch_width(img, stitches_w)
     w, h = resized.size
     preview_h = max(1, int(round(h * row_aspect)))
@@ -177,7 +169,6 @@ def to_monochrome(img: Image.Image, threshold: int = 180) -> Image.Image:
 
 
 def serpentine_points(bw: Image.Image, step: int = 3) -> List[Tuple[int, int]]:
-    """Naive run-stitch path by row scanning."""
     w, h = bw.size
     pts: List[Tuple[int, int]] = []
     data = bw.load()
@@ -192,7 +183,6 @@ def serpentine_points(bw: Image.Image, step: int = 3) -> List[Tuple[int, int]]:
 
 
 def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -> Dict[str, bytes]:
-    """Emit DST/PES if pyembroidery is available; always emit SVG polyline."""
     out: Dict[str, bytes] = {}
     if paths:
         svg_points = " ".join([f"{int(x * scale)},{int(y * scale)}" for x, y in paths])
@@ -207,7 +197,7 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
         last: Optional[Tuple[int, int]] = None
         for (x, y) in paths:
             if last is None:
-                pat.add_stitch_absolute(0, 0, 2)  # move
+                pat.add_stitch_absolute(0, 0, 2)
             pat.add_stitch_absolute(x, y)
             last = (x, y)
         pat.end()
@@ -220,17 +210,13 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# ---------------------- PAYWALL HELPERS ----------------------
+# ---------------------- SIMPLE FREE LIMIT ----------------------
 def today_str() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d")
 
 
-def is_pro() -> bool:
-    return bool(session.get("is_pro", False))
-
-
 def can_use_free_export() -> bool:
-    if is_pro():
+    if session.get("is_pro"):
         return True
     today = today_str()
     last = session.get("free_day")
@@ -243,7 +229,7 @@ def can_use_free_export() -> bool:
 
 
 def register_export() -> None:
-    if is_pro():
+    if session.get("is_pro"):
         return
     today = today_str()
     last = session.get("free_day")
@@ -259,18 +245,6 @@ def register_export() -> None:
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
-
-
-@app.get("/debug/pro/on")
-def debug_pro_on():
-    session["is_pro"] = True
-    return "Pro mode ON."
-
-
-@app.get("/debug/pro/off")
-def debug_pro_off():
-    session["is_pro"] = False
-    return "Pro mode OFF."
 
 
 @app.errorhandler(413)
@@ -323,7 +297,6 @@ def convert():
     if max(base.size) > MAX_DIM:
         return jsonify({"error": "image_too_large"}), 400
 
-    # paywall: 1 free export per day
     if not can_use_free_export():
         return redirect(url_for("pricing", reason="limit"))
 
@@ -423,13 +396,13 @@ def convert():
     )
 
 
-# ---------------------- INLINE HTML ----------------------
+# ---------------------- TEMPLATES ----------------------
 HOMEPAGE_HTML = r"""
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>PatternCraft — Turn art into patterns</title>
+<title>PatternCraft.app — Turn art into patterns</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{
@@ -451,8 +424,6 @@ h2{margin:0 0 10px}
       border:none;cursor:pointer;font-size:14px;font-weight:600;letter-spacing:.02em;box-shadow:0 4px 12px rgba(0,0,0,.18);transition:transform .08s,box-shadow .08s}
 .pill:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.22)}
 .pill-secondary{background:#fff;color:var(--fg);border:1px solid var(--line);box-shadow:none}
-.features{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:24px}
-.feature-title{font-weight:600;margin-bottom:4px}
 .make-layout{display:flex;gap:20px;flex-wrap:wrap}
 .make-main{flex:1 1 260px}
 .make-sample{flex:1 1 260px;display:flex;flex-direction:column;gap:12px}
@@ -496,7 +467,7 @@ legend{font-size:13px}
   <div class="hero-text">
     <h1>Turn art into stitchable patterns</h1>
     <p class="muted">
-      PatternCraft converts your artwork into cross-stitch grids, knitting charts,
+      PatternCraft.app converts your artwork into cross-stitch grids, knitting charts,
       and embroidery-ready files with one upload.
     </p>
     <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
@@ -509,7 +480,7 @@ legend{font-size:13px}
     </div>
   </div>
   <div class="card" style="flex:1 1 280px">
-    <h2 style="margin-top:0;font-size:1.1rem">Why PatternCraft</h2>
+    <h2 style="margin-top:0;font-size:1.1rem">Why PatternCraft.app</h2>
     <ul class="muted" style="padding-left:18px">
       <li>Clean grids with bold 10×10 guides</li>
       <li>Floss estimates per color for planning</li>
@@ -520,23 +491,22 @@ legend{font-size:13px}
 </div>
 
 <div id="how" class="card" style="margin-bottom:24px">
-  <h2 style="margin-top:0;font-size:1.1rem">See a PatternCraft conversion</h2>
+  <h2 style="margin-top:0;font-size:1.1rem">See a PatternCraft.app conversion</h2>
   <div class="sample-grid">
     <div class="sample-card">
       <div class="sample-label">Artwork in</div>
       <div class="sample-art">
-        <!-- Short alt so it doesn't spam text if the image fails -->
         <img src="/static/sample-leaves.jpg" alt="Leaf artwork sample">
       </div>
       <div class="sample-note">
-        A colorful autumn leaf illustration — exactly the kind of art people love turning into quilts and stitch patterns.
+        A colorful autumn leaf illustration — the kind of art people turn into quilts, pillows, and stitch samplers.
       </div>
     </div>
     <div class="sample-card">
       <div class="sample-label">Pattern out (preview)</div>
       <div class="sample-pattern"></div>
       <div class="sample-note">
-        PatternCraft turns artwork like this into a printable grid with symbols, a color legend, and an optional PDF layout —
+        PatternCraft.app turns artwork like this into a printable grid with symbols, a color legend, and an optional PDF layout —
         the same structure you get when you generate your own pattern.
       </div>
     </div>
@@ -634,12 +604,11 @@ legend{font-size:13px}
         <div class="sample-pattern"></div>
         <div class="sample-note" style="margin-top:6px;">
           Curious what a finished deliverable looks like? Download a <strong>free sample pattern ZIP</strong>
-          generated from the autumn leaf artwork above — same structure you get from your own uploads.
+          generated from the autumn leaf artwork above — structured exactly like a real PatternCraft.app export.
         </div>
-        <button type="button" class="pill pill-secondary" style="margin-top:8px;"
-                onclick="alert('Wire this button to a real sample ZIP download, e.g., /static/sample-pattern.zip');">
+        <a href="/static/sample-pattern.zip" class="pill pill-secondary" style="margin-top:8px;display:inline-block;text-align:center;">
           Download sample ZIP
-        </button>
+        </a>
       </div>
     </div>
   </div>
@@ -708,7 +677,7 @@ PRICING_HTML = r"""
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>PatternCraft — Pricing</title>
+<title>PatternCraft.app — Pricing</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{margin:0;background:#F7F4EF;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter}
@@ -724,17 +693,17 @@ h1{margin-top:0}
 </head>
 <body>
 <div class="wrap">
-  <h1>PatternCraft pricing</h1>
-  <p class="muted">Start free. Upgrade only when you’re actually using it.</p>
+  <h1>PatternCraft.app pricing</h1>
+  <p class="muted">Try PatternCraft.app, then upgrade only if it becomes part of your creative workflow.</p>
   <div class="plans">
     <div class="card">
-      <div class="price">Free</div>
+      <div class="price">Free — try us out</div>
       <ul class="muted">
-        <li>1 verified free pattern</li>
-        <li>All stitch types</li>
-        <li>No card required</li>
+        <li>1 free PatternCraft.app pattern conversion</li>
+        <li>All stitch types included</li>
+        <li>Try us out, join our us for annual newsletter</li>
       </ul>
-      <a href="/" class="btn">Use my free pattern</a>
+      <a href="/" class="btn">Start free</a>
     </div>
     <div class="card">
       <div class="price">$5 / 10 patterns</div>
@@ -758,7 +727,7 @@ h1{margin-top:0}
       <div class="price">$100 / year</div>
       <ul class="muted">
         <li>Unlimited patterns all year</li>
-        <li>Best value</li>
+        <li>Best value for frequent makers</li>
         <li>No monthly billing</li>
       </ul>
       <a href="#" class="btn">Go unlimited yearly</a>
@@ -770,7 +739,7 @@ h1{margin-top:0}
   (function () {
     const params = new URLSearchParams(window.location.search);
     if (params.get('reason') === 'limit') {
-      alert('You used your free PatternCraft conversion for today. Upgrade to keep generating patterns.');
+      alert('You used your free PatternCraft.app conversion for today. Upgrade to keep generating patterns.');
     }
   }());
 </script>
@@ -780,5 +749,4 @@ h1{margin-top:0}
 """
 
 if __name__ == "__main__":
-    # local dev; on Render use gunicorn app:app --bind 0.0.0.0:$PORT
     app.run(host="127.0.0.1", port=5050, debug=True)
