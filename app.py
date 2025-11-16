@@ -325,7 +325,6 @@ def convert():
 
     # paywall: 1 free export per day
     if not can_use_free_export():
-        # add ?reason=limit so pricing page can show a popup
         return redirect(url_for("pricing", reason="limit"))
 
     out_zip = io.BytesIO()
@@ -436,9 +435,9 @@ HOMEPAGE_HTML = r"""
 :root{
   --bg:#F7F4EF;--fg:#222;--muted:#6b6b6b;
   --line:#e8e4de;--radius:14px;--shadow:0 6px 20px rgba(0,0,0,.08);
-  --accent:#4C7CF3;--accent-soft:#e3ebff;
+  --accent:#4C7CF3;--accent-soft:#e3ebff;--accent-strong:#173d99;
 }
-body{margin:0;background:linear-gradient(135deg,#f9f6ef,#f1f4ff);color:var(--fg);
+body{margin:0;background:radial-gradient(circle at top,#fef3c7,#f1f4ff 45%,#f7f4ef 100%);color:var(--fg);
      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter}
 .wrap{max-width:980px;margin:0 auto;padding:24px 16px 40px}
 h1{font-size:2.3rem;margin:0 0 6px}
@@ -448,9 +447,10 @@ h2{margin:0 0 10px}
 .hero{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:24px;align-items:center}
 .hero-text{flex:1 1 280px}
 .muted{color:var(--muted);font-size:13px}
-.pill{padding:9px 16px;border-radius:999px;background:var(--accent);color:#fff;
-      border:none;cursor:pointer;font-size:14px}
-.pill-secondary{background:#fff;color:var(--fg);border:1px solid var(--line)}
+.pill{padding:10px 18px;border-radius:999px;background:linear-gradient(135deg,var(--accent),var(--accent-strong));color:#fff;
+      border:none;cursor:pointer;font-size:14px;font-weight:600;letter-spacing:.02em;box-shadow:0 4px 12px rgba(0,0,0,.18);transition:transform .08s,box-shadow .08s}
+.pill:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.22)}
+.pill-secondary{background:#fff;color:var(--fg);border:1px solid var(--line);box-shadow:none}
 .features{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:24px}
 .feature-title{font-weight:600;margin-bottom:4px}
 .make-layout{display:flex;gap:20px;flex-wrap:wrap}
@@ -470,11 +470,11 @@ h2{margin:0 0 10px}
                        font-size:22px;font-weight:700;color:rgba(0,0,0,.35)}
 .sample-note{font-size:12px;color:var(--muted)}
 .file{border:2px dashed var(--accent);border-radius:18px;
-      padding:18px;display:flex;align-items:center;gap:12px;cursor:pointer;
-      background:var(--accent-soft);transition:background .15s,border-color .15s,transform .1s}
-.file:hover{background:#d9e3ff;border-color:#365ed1;transform:translateY(-1px)}
+      padding:20px;display:flex;align-items:center;gap:12px;cursor:pointer;
+      background:var(--accent-soft);transition:background .15s,border-color .15s,transform .1s,box-shadow .1s}
+.file:hover{background:#d9e3ff;border-color:#365ed1;transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.18)}
 .file input{display:none}
-.file-label-main{font-weight:700;font-size:15px}
+.file-label-main{font-weight:800;font-size:16px;text-transform:uppercase;letter-spacing:.06em}
 .file-label-sub{font-size:12px;color:var(--muted)}
 .free-note{margin-top:6px;font-size:12px;color:#1c5c2f;background:#e1f4e5;
           border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center;gap:6px}
@@ -525,18 +525,19 @@ legend{font-size:13px}
     <div class="sample-card">
       <div class="sample-label">Artwork in</div>
       <div class="sample-art">
-        <img src="/static/sample-leaves.jpg" alt="Sample autumn leaf artwork used for quilting and stitching patterns">
+        <!-- Short alt so it doesn't spam text if the image fails -->
+        <img src="/static/sample-leaves.jpg" alt="Leaf artwork sample">
       </div>
       <div class="sample-note">
-        This is an example illustration you might upload — colorful, detailed, and ready to be turned into stitches.
+        A colorful autumn leaf illustration — exactly the kind of art people love turning into quilts and stitch patterns.
       </div>
     </div>
     <div class="sample-card">
       <div class="sample-label">Pattern out (preview)</div>
       <div class="sample-pattern"></div>
       <div class="sample-note">
-        PatternCraft turns images like this into a printable grid with symbols, a color legend, and an optional PDF layout —
-        exactly what you get when you generate a pattern from your own art.
+        PatternCraft turns artwork like this into a printable grid with symbols, a color legend, and an optional PDF layout —
+        the same structure you get when you generate your own pattern.
       </div>
     </div>
   </div>
@@ -550,7 +551,7 @@ legend{font-size:13px}
         <label class="file">
           <input id="fileInput" type="file" name="file" accept="image/*" required onchange="pickFile(this)">
           <div>
-            <div class="file-label-main">Upload picture here</div>
+            <div class="file-label-main">UPLOAD PICTURE HERE</div>
             <div class="file-label-sub">
               Drop in your artwork or click to browse from your device.
             </div>
@@ -562,7 +563,7 @@ legend{font-size:13px}
             <span>You have a free pattern conversion available — upload art!</span>
           </div>
           <button type="button" class="pill pill-secondary" onclick="location.href='#how'">
-            See how it works
+            See how it works!
           </button>
         </div>
 
@@ -632,11 +633,11 @@ legend{font-size:13px}
         <div class="sample-label">Free sample pattern ZIP</div>
         <div class="sample-pattern"></div>
         <div class="sample-note" style="margin-top:6px;">
-          Curious what you get before uploading anything?
-          Download a <strong>free sample pattern ZIP</strong> generated from the autumn leaf artwork above.
+          Curious what a finished deliverable looks like? Download a <strong>free sample pattern ZIP</strong>
+          generated from the autumn leaf artwork above — same structure you get from your own uploads.
         </div>
         <button type="button" class="pill pill-secondary" style="margin-top:8px;"
-                onclick="alert('Wire this button to a real sample ZIP download (e.g., /static/sample-pattern.zip).');">
+                onclick="alert('Wire this button to a real sample ZIP download, e.g., /static/sample-pattern.zip');">
           Download sample ZIP
         </button>
       </div>
@@ -779,5 +780,5 @@ h1{margin-top:0}
 """
 
 if __name__ == "__main__":
-    # local dev; on Render use: gunicorn app:app --bind 0.0.0.0:$PORT
+    # local dev; on Render use gunicorn app:app --bind 0.0.0.0:$PORT
     app.run(host="127.0.0.1", port=5050, debug=True)
