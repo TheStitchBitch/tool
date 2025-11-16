@@ -455,25 +455,19 @@ h2{margin:0 0 10px}
 .feature-title{font-weight:600;margin-bottom:4px}
 .make-layout{display:flex;gap:20px;flex-wrap:wrap}
 .make-main{flex:1 1 260px}
-.make-sample{flex:1 1 260px;display:flex;flex-direction:column;gap:8px}
-.sample-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.sample-card{border-radius:12px;border:1px solid var(--line);padding:10px;background:#fff}
+.make-sample{flex:1 1 260px;display:flex;flex-direction:column;gap:12px}
+.sample-grid{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+.sample-card{border-radius:12px;border:1px solid var(--line);padding:10px;background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.04)}
 .sample-label{font-weight:600;font-size:13px;margin-bottom:6px}
-.sample-art{border-radius:8px;background:linear-gradient(135deg,#f9d7d7,#fef3c7);
-            height:120px;position:relative;overflow:hidden}
-.sample-art::before{content:"";position:absolute;border-radius:999px;
-                    width:80px;height:80px;background:rgba(255,255,255,.55);
-                    top:18px;left:12px}
-.sample-art::after{content:"";position:absolute;border-radius:12px;
-                   width:90px;height:60px;background:rgba(255,255,255,.8);
-                   bottom:10px;right:16px}
+.sample-art{border-radius:8px;overflow:hidden}
+.sample-art img{width:100%;display:block}
 .sample-pattern{border-radius:8px;border:1px dashed #d0cdc3;
                 background-image:linear-gradient(to right, rgba(0,0,0,.08) 1px, transparent 1px),
                                  linear-gradient(to bottom, rgba(0,0,0,.08) 1px, transparent 1px);
-                background-size:10px 10px;height:120px;position:relative;overflow:hidden}
+                background-size:10px 10px;height:140px;position:relative;overflow:hidden}
 .sample-pattern::after{content:"★ ♢ ○";position:absolute;inset:0;
                        display:flex;align-items:center;justify-content:center;
-                       font-size:22px;color:rgba(0,0,0,.4)}
+                       font-size:22px;font-weight:700;color:rgba(0,0,0,.35)}
 .sample-note{font-size:12px;color:var(--muted)}
 .file{border:2px dashed var(--accent);border-radius:18px;
       padding:18px;display:flex;align-items:center;gap:12px;cursor:pointer;
@@ -526,19 +520,23 @@ legend{font-size:13px}
 </div>
 
 <div id="how" class="card" style="margin-bottom:24px">
-  <h2 style="margin-top:0;font-size:1.1rem">See a pattern in action</h2>
+  <h2 style="margin-top:0;font-size:1.1rem">See a PatternCraft conversion</h2>
   <div class="sample-grid">
     <div class="sample-card">
       <div class="sample-label">Artwork in</div>
-      <div class="sample-art"></div>
-      <div class="sample-note">Imagine a small floral illustration or pixel art you upload.</div>
+      <div class="sample-art">
+        <img src="/static/sample-leaves.jpg" alt="Sample autumn leaf artwork used for quilting and stitching patterns">
+      </div>
+      <div class="sample-note">
+        This is an example illustration you might upload — colorful, detailed, and ready to be turned into stitches.
+      </div>
     </div>
     <div class="sample-card">
-      <div class="sample-label">Pattern out</div>
+      <div class="sample-label">Pattern out (preview)</div>
       <div class="sample-pattern"></div>
       <div class="sample-note">
-        We convert your art into a printable grid with symbols, legend, and optional PDF.
-        You can also <strong>upload your own image free</strong> to generate a real pattern.
+        PatternCraft turns images like this into a printable grid with symbols, a color legend, and an optional PDF layout —
+        exactly what you get when you generate a pattern from your own art.
       </div>
     </div>
   </div>
@@ -630,15 +628,15 @@ legend{font-size:13px}
     </div>
 
     <div class="make-sample">
-      <div class="muted" style="font-weight:600;">Free sample pattern</div>
       <div class="sample-card">
-        <div class="sample-label">Try a generated pattern</div>
+        <div class="sample-label">Free sample pattern ZIP</div>
         <div class="sample-pattern"></div>
         <div class="sample-note" style="margin-top:6px;">
-          Want to see a finished deliverable before you upload anything?
-          Download a <strong>sample pattern ZIP</strong> and inspect the files.
+          Curious what you get before uploading anything?
+          Download a <strong>free sample pattern ZIP</strong> generated from the autumn leaf artwork above.
         </div>
-        <button type="button" class="pill pill-secondary" style="margin-top:8px;" onclick="alert('Wire this to a real sample ZIP later.')">
+        <button type="button" class="pill pill-secondary" style="margin-top:8px;"
+                onclick="alert('Wire this button to a real sample ZIP download (e.g., /static/sample-pattern.zip).');">
           Download sample ZIP
         </button>
       </div>
@@ -731,31 +729,38 @@ h1{margin-top:0}
     <div class="card">
       <div class="price">Free</div>
       <ul class="muted">
-        <li>1 export / day</li>
-        <li>Cross-stitch, knitting, embroidery</li>
+        <li>1 verified free pattern</li>
+        <li>All stitch types</li>
         <li>No card required</li>
       </ul>
-      <a href="/" class="btn">Keep using free</a>
+      <a href="/" class="btn">Use my free pattern</a>
     </div>
     <div class="card">
-      <div class="price">$9 / month</div>
+      <div class="price">$5 / 10 patterns</div>
       <ul class="muted">
-        <li>Unlimited exports</li>
+        <li>Pay once, use whenever</li>
+        <li>Great for small projects</li>
+        <li>Credits never expire</li>
+      </ul>
+      <a href="#" class="btn">Buy 10 patterns</a>
+    </div>
+    <div class="card">
+      <div class="price">$20 / month</div>
+      <ul class="muted">
+        <li>Unlimited conversions</li>
         <li>Priority processing</li>
-        <li>Supports new features</li>
+        <li>Ideal for shops & power users</li>
       </ul>
-      <!-- Replace with your Stripe Payment Link -->
-      <a href="https://buy.stripe.com/your-monthly-link" class="btn">Subscribe</a>
+      <a href="#" class="btn">Go unlimited monthly</a>
     </div>
     <div class="card">
-      <div class="price">$3 / 50 exports</div>
+      <div class="price">$100 / year</div>
       <ul class="muted">
-        <li>Pay as you go</li>
-        <li>Good for occasional projects</li>
-        <li>No subscription</li>
+        <li>Unlimited patterns all year</li>
+        <li>Best value</li>
+        <li>No monthly billing</li>
       </ul>
-      <!-- Replace with your Stripe Payment Link -->
-      <a href="https://buy.stripe.com/your-credits-link" class="btn">Buy credits</a>
+      <a href="#" class="btn">Go unlimited yearly</a>
     </div>
   </div>
 </div>
@@ -774,5 +779,5 @@ h1{margin-top:0}
 """
 
 if __name__ == "__main__":
-    # local dev; on Render use gunicorn app:app --bind 0.0.0.0:$PORT
+    # local dev; on Render use: gunicorn app:app --bind 0.0.0.0:$PORT
     app.run(host="127.0.0.1", port=5050, debug=True)
