@@ -455,22 +455,32 @@ h2{margin:0 0 10px}
 .feature-title{font-weight:600;margin-bottom:4px}
 .make-layout{display:flex;gap:20px;flex-wrap:wrap}
 .make-main{flex:1 1 260px}
-.make-sample{flex:1 1 220px;display:flex;flex-direction:column;gap:8px}
-.sample-box{border-radius:12px;border:1px dashed var(--line);
-            background:repeating-linear-gradient(
-               90deg, #f4f2ec 0, #f4f2ec 9px, #e0ddd6 10px),
-                       repeating-linear-gradient(
-               180deg, #f4f2ec 0, #f4f2ec 9px, #e0ddd6 10px);
-            background-blend-mode:multiply;
-            aspect-ratio:4/3;position:relative;overflow:hidden}
-.sample-overlay{position:absolute;inset:10%;display:grid;place-items:center;
-                font-size:11px;color:#333;background:rgba(255,255,255,0.6)}
+.make-sample{flex:1 1 260px;display:flex;flex-direction:column;gap:8px}
+.sample-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sample-card{border-radius:12px;border:1px solid var(--line);padding:10px;background:#fff}
+.sample-label{font-weight:600;font-size:13px;margin-bottom:6px}
+.sample-art{border-radius:8px;background:linear-gradient(135deg,#f9d7d7,#fef3c7);
+            height:120px;position:relative;overflow:hidden}
+.sample-art::before{content:"";position:absolute;border-radius:999px;
+                    width:80px;height:80px;background:rgba(255,255,255,.55);
+                    top:18px;left:12px}
+.sample-art::after{content:"";position:absolute;border-radius:12px;
+                   width:90px;height:60px;background:rgba(255,255,255,.8);
+                   bottom:10px;right:16px}
+.sample-pattern{border-radius:8px;border:1px dashed #d0cdc3;
+                background-image:linear-gradient(to right, rgba(0,0,0,.08) 1px, transparent 1px),
+                                 linear-gradient(to bottom, rgba(0,0,0,.08) 1px, transparent 1px);
+                background-size:10px 10px;height:120px;position:relative;overflow:hidden}
+.sample-pattern::after{content:"★ ♢ ○";position:absolute;inset:0;
+                       display:flex;align-items:center;justify-content:center;
+                       font-size:22px;color:rgba(0,0,0,.4)}
+.sample-note{font-size:12px;color:var(--muted)}
 .file{border:2px dashed var(--accent);border-radius:18px;
       padding:18px;display:flex;align-items:center;gap:12px;cursor:pointer;
       background:var(--accent-soft);transition:background .15s,border-color .15s,transform .1s}
 .file:hover{background:#d9e3ff;border-color:#365ed1;transform:translateY(-1px)}
 .file input{display:none}
-.file-label-main{font-weight:600;font-size:15px}
+.file-label-main{font-weight:700;font-size:15px}
 .file-label-sub{font-size:12px;color:var(--muted)}
 .free-note{margin-top:6px;font-size:12px;color:#1c5c2f;background:#e1f4e5;
           border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center;gap:6px}
@@ -500,7 +510,7 @@ legend{font-size:13px}
         Upload art
       </button>
       <button class="pill pill-secondary" onclick="location.href='#how'">
-        See what you get
+        See how it works
       </button>
     </div>
   </div>
@@ -515,18 +525,22 @@ legend{font-size:13px}
   </div>
 </div>
 
-<div id="how" class="features">
-  <div class="card">
-    <div class="feature-title">Cross-stitch</div>
-    <p class="muted">Upload art, pick size and colors, get a crisp grid with symbols and rough skein estimates.</p>
-  </div>
-  <div class="card">
-    <div class="feature-title">Knitting charts</div>
-    <p class="muted">Generate colorwork charts with realistic row aspect and multiple stitch styles.</p>
-  </div>
-  <div class="card">
-    <div class="feature-title">Embroidery</div>
-    <p class="muted">Create run-stitch paths and export embroidery-friendly files or SVG for fine-tuning.</p>
+<div id="how" class="card" style="margin-bottom:24px">
+  <h2 style="margin-top:0;font-size:1.1rem">See a pattern in action</h2>
+  <div class="sample-grid">
+    <div class="sample-card">
+      <div class="sample-label">Artwork in</div>
+      <div class="sample-art"></div>
+      <div class="sample-note">Imagine a small floral illustration or pixel art you upload.</div>
+    </div>
+    <div class="sample-card">
+      <div class="sample-label">Pattern out</div>
+      <div class="sample-pattern"></div>
+      <div class="sample-note">
+        We convert your art into a printable grid with symbols, legend, and optional PDF.
+        You can also <strong>upload your own image free</strong> to generate a real pattern.
+      </div>
+    </div>
   </div>
 </div>
 
@@ -536,15 +550,22 @@ legend{font-size:13px}
     <div class="make-main">
       <form method="POST" action="/api/convert" enctype="multipart/form-data">
         <label class="file">
-          <input type="file" name="file" accept="image/*" required onchange="pickFile(this)">
+          <input id="fileInput" type="file" name="file" accept="image/*" required onchange="pickFile(this)">
           <div>
             <div class="file-label-main">Upload picture here</div>
-            <div class="file-label-sub">Drop in your artwork or click to browse from your device.</div>
+            <div class="file-label-sub">
+              Drop in your artwork or click to browse from your device.
+            </div>
           </div>
         </label>
-        <div class="free-note">
-          <div class="free-dot"></div>
-          <span>You have a free pattern conversion available — upload art!</span>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap">
+          <div class="free-note">
+            <div class="free-dot"></div>
+            <span>You have a free pattern conversion available — upload art!</span>
+          </div>
+          <button type="button" class="pill pill-secondary" onclick="location.href='#how'">
+            See how it works
+          </button>
         </div>
 
         <fieldset>
@@ -601,24 +622,25 @@ legend{font-size:13px}
 
         <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <button class="pill" type="submit">Generate ZIP</button>
-          <span class="muted">We’ll bundle the grid, legend, meta, and optional PDF into one download.</span>
+          <span class="muted">
+            Your download includes grid.png, legend.csv, meta.json, and optional pattern.pdf or embroidery files.
+          </span>
         </div>
       </form>
     </div>
 
     <div class="make-sample">
-      <div class="muted" style="font-weight:600;">Sample output preview</div>
-      <div class="sample-box">
-        <div class="sample-overlay">
-          <div>
-            <div style="font-weight:600;margin-bottom:4px;">Cross-stitch grid</div>
-            <div>10×10 guides, symbol overlay, printable PDF feel.</div>
-          </div>
+      <div class="muted" style="font-weight:600;">Free sample pattern</div>
+      <div class="sample-card">
+        <div class="sample-label">Try a generated pattern</div>
+        <div class="sample-pattern"></div>
+        <div class="sample-note" style="margin-top:6px;">
+          Want to see a finished deliverable before you upload anything?
+          Download a <strong>sample pattern ZIP</strong> and inspect the files.
         </div>
-      </div>
-      <div class="muted" style="font-size:12px;">
-        Actual downloads include <strong>grid.png</strong>, <strong>legend.csv</strong>, <strong>meta.json</strong>,
-        and optional <strong>pattern.pdf</strong> or embroidery files.
+        <button type="button" class="pill pill-secondary" style="margin-top:8px;" onclick="alert('Wire this to a real sample ZIP later.')">
+          Download sample ZIP
+        </button>
       </div>
     </div>
   </div>
@@ -627,11 +649,14 @@ legend{font-size:13px}
 </div>
 <script>
 function pickFile(inp){
-  document.getElementById('fname')?.textContent;
+  const label = document.querySelector('.file-label-main');
+  if (!inp.files || !inp.files[0] || !label) return;
+  label.textContent = 'Selected: ' + inp.files[0].name;
 }
 
 function setStyleOptions(type){
   const sel = document.getElementById('stitch_style');
+  if (!sel) return;
   sel.innerHTML = '';
   let opts = [];
   if(type === 'cross'){
@@ -657,7 +682,8 @@ function setStyleOptions(type){
   }
 }
 function onTypeChange(){
-  const type = document.querySelector('input[name="ptype"]:checked').value;
+  const typeInput = document.querySelector('input[name="ptype"]:checked');
+  const type = typeInput ? typeInput.value : 'cross';
   const crossKnit = document.getElementById('crossKnitBlock');
   const emb = document.getElementById('embBlock');
   if(type === 'emb'){
