@@ -18,6 +18,7 @@ from flask import (
     session,
 )
 from PIL import Image, ImageDraw, ImageFont
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Optional embroidery support
 try:
@@ -29,8 +30,8 @@ except Exception:
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-# Optional: subscriber access code (set this in Render env vars)
-SUBSCRIBER_CODE = os.environ.get("PATTERNCRAFT_SUBSCRIBER_CODE", "")
+# Where we store users (very simple JSON "database")
+USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 
 # ---------------------- CONFIG ----------------------
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
@@ -38,6 +39,37 @@ ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
 CELL_PX = 12
 MAX_DIM = 8000  # max width/height in pixels
+
+
+# ---------------------- USER STORAGE ----------------------
+def load_users() -> Dict[str, dict]:
+    """Load users from JSON file."""
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    return {}
+
+
+def save_users(users: Dict[str, dict]) -> None:
+    """Safely save users to JSON file."""
+    tmp = USERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2)
+    os.replace(tmp, USERS_FILE)
+
+
+def get_current_user() -> Optional[dict]:
+    email = session.get("user_email")
+    if not email:
+        return None
+    users = load_users()
+    return users.get(email)
 
 
 # ---------------------- IMAGE / PATTERN HELPERS ----------------------
@@ -220,25 +252,7 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# ---------------------- ACCESS CONTROL ----------------------
-def has_tool_access() -> bool:
-    """True if this session has passed the paywall (email or subscriber)."""
-    return bool(session.get("has_access"))
-
-
-def grant_email_access(email: str) -> None:
-    session["has_access"] = True
-    session["email"] = email
-    session.setdefault("is_subscriber", False)
-
-
-def grant_subscriber_access(email: str) -> None:
-    session["has_access"] = True
-    session["is_subscriber"] = True
-    session["email"] = email
-
-
-# ---------------------- ROUTES ----------------------
+# ---------------------- ROUTES: BASIC ----------------------
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -251,68 +265,142 @@ def too_large(_e):
 
 @app.errorhandler(Exception)
 def on_error(_e):
-    # In production you would log _e somewhere
+    # In production you would log _e somewhere central
     return make_response(jsonify({"error": "server_error"}), 500)
 
 
 @app.get("/")
 def index() -> str:
-    return render_template_string(HOMEPAGE_HTML)
+    user = get_current_user()
+    return render_template_string(HOMEPAGE_HTML, user=user)
 
 
 @app.get("/pricing")
 def pricing() -> str:
-    return render_template_string(PRICING_HTML)
+    user = get_current_user()
+    reason = request.args.get("reason", "")
+    message = ""
+    if reason == "used_free":
+        message = "You’ve already used your PatternCraft.app pattern for this account. Choose a plan to keep generating patterns."
+    return render_template_string(PRICING_HTML, user=user, message=message)
 
 
-@app.get("/access")
-def access_gate() -> str:
-    reason = request.args.get("reason")
-    msg = ""
-    if reason == "no_access":
-        msg = "Create free access with your email to start generating patterns in PatternCraft.app."
-    return render_template_string(ACCESS_HTML, message=msg)
+# ---------------------- ROUTES: SIGNUP / LOGIN ----------------------
+@app.get("/signup")
+def signup() -> str:
+    user = get_current_user()
+    msg = request.args.get("msg", "")
+    return render_template_string(SIGNUP_HTML, user=user, message=msg)
 
 
-@app.post("/access")
-def access_gate_post():
-    email = (request.form.get("email") or "").strip()
+@app.post("/signup")
+def signup_post():
+    user = get_current_user()
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    confirm = request.form.get("confirm") or ""
+
     if not email or "@" not in email:
-        msg = "Please enter a valid email address."
-        return render_template_string(ACCESS_HTML, message=msg)
-    grant_email_access(email)
+        return render_template_string(
+            SIGNUP_HTML, user=user, message="Please enter a valid email address."
+        )
+    if len(password) < 8:
+        return render_template_string(
+            SIGNUP_HTML, user=user, message="Password must be at least 8 characters."
+        )
+    if password != confirm:
+        return render_template_string(
+            SIGNUP_HTML, user=user, message="Passwords do not match."
+        )
+
+    users = load_users()
+    if email in users:
+        return render_template_string(
+            SIGNUP_HTML,
+            user=user,
+            message="This email already has an account. Please log in instead.",
+        )
+
+    users[email] = {
+        "email": email,
+        "password_hash": generate_password_hash(password),
+        # subscription types can be: "free", "pro_monthly", "pro_yearly", "pro_unlimited", etc.
+        "subscription": "free",
+        "free_used": False,
+    }
+    save_users(users)
+    session["user_email"] = email
     return redirect(url_for("index"))
 
 
 @app.get("/login")
 def login() -> str:
-    return render_template_string(LOGIN_HTML, message="")
+    user = get_current_user()
+    return render_template_string(LOGIN_HTML, user=user, message="")
 
 
 @app.post("/login")
 def login_post():
-    email = (request.form.get("email") or "").strip()
-    code = (request.form.get("code") or "").strip()
-    if not email or not code:
+    user = get_current_user()
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+
+    if not email or not password:
         return render_template_string(
             LOGIN_HTML,
-            message="Please enter both email and access code.",
+            user=user,
+            message="Please enter both email and password.",
         )
-    if SUBSCRIBER_CODE and code == SUBSCRIBER_CODE:
-        grant_subscriber_access(email)
-        return redirect(url_for("index"))
-    return render_template_string(
-        LOGIN_HTML,
-        message="Access code not recognized. Check your subscriber email or contact support.",
-    )
+
+    users = load_users()
+    stored = users.get(email)
+    if not stored or not check_password_hash(stored.get("password_hash", ""), password):
+        return render_template_string(
+            LOGIN_HTML,
+            user=user,
+            message="Incorrect email or password.",
+        )
+
+    session["user_email"] = email
+    return redirect(url_for("index"))
 
 
+@app.get("/logout")
+def logout():
+    session.pop("user_email", None)
+    return redirect(url_for("index"))
+
+
+# ---------------------- ROUTE: CONVERT (ONE FREE PATTERN PER EMAIL) ----------------------
 @app.post("/api/convert")
 def convert():
-    # Paywall: must have email access or subscriber login
-    if not has_tool_access():
-        return redirect(url_for("access_gate", reason="no_access"))
+    # Require an account
+    email = session.get("user_email")
+    if not email:
+        return redirect(url_for("signup", msg="Create your PatternCraft.app account to generate patterns."))
 
+    users = load_users()
+    user = users.get(email)
+    if not user:
+        session.pop("user_email", None)
+        return redirect(url_for("signup", msg="Please create your PatternCraft.app account to continue."))
+
+    subscription = user.get("subscription", "free")
+    mark_free_used = False
+
+    # Decide if this account is allowed to generate another pattern
+    if subscription in ("pro_monthly", "pro_yearly", "pro_unlimited"):
+        # Paid plans: no limit here
+        pass
+    else:
+        if user.get("free_used"):
+            # Already used the one included pattern
+            return redirect(url_for("pricing", reason="used_free"))
+        else:
+            # Let this pattern go through; after success we mark as used
+            mark_free_used = True
+
+    # Normal convert logic
     file = request.files.get("file")
     if not file:
         return jsonify({"error": "missing_file"}), 400
@@ -427,6 +515,12 @@ def convert():
         else:
             return jsonify({"error": "unknown_ptype"}), 400
 
+    # mark free pattern as used only after successful generation
+    if mark_free_used:
+        user["free_used"] = True
+        users[email] = user
+        save_users(users)
+
     out_zip.seek(0)
     return send_file(
         out_zip,
@@ -466,6 +560,13 @@ HOMEPAGE_HTML = r"""
     .wrap{max-width:1040px;margin:0 auto;padding:24px 16px 48px}
     h1{font-size:2.6rem;margin:0 0 8px}
     h2{margin:0 0 10px}
+    .topbar{
+      display:flex;align-items:center;justify-content:space-between;
+      margin-bottom:18px;
+    }
+    .brand{font-weight:800;font-size:20px;letter-spacing:.04em;text-transform:uppercase;}
+    .top-links{font-size:13px;color:#4b5563}
+    .top-links a{margin-left:8px;}
     .chip{
       display:inline-flex;align-items:center;gap:6px;
       padding:4px 10px;border-radius:999px;
@@ -592,6 +693,18 @@ HOMEPAGE_HTML = r"""
 <body>
 <div class="wrap">
 
+  <div class="topbar">
+    <div class="brand">PatternCraft.app</div>
+    <div class="top-links">
+      {% if user %}
+        Signed in as {{ user.email }} ({{ user.subscription }} plan)
+        · <a href="/logout">Sign out</a>
+      {% else %}
+        <a href="/login">Log in</a> · <a href="/signup">Create account</a>
+      {% endif %}
+    </div>
+  </div>
+
   <div class="hero">
     <div class="hero-text">
       <div class="chip">
@@ -612,14 +725,13 @@ HOMEPAGE_HTML = r"""
         </button>
       </div>
       <div class="hero-note">
-        Step 1: <a href="#how">View the example pattern</a> ·
-        Step 2: <a href="/access">Get access with email</a> ·
-        Step 3: Upload art and generate your own.
-        Already subscribed? <a href="/login">Log in here</a>.
+        Step 1: <a href="#how">Preview a finished pattern</a> ·
+        Step 2: <a href="/signup">Create your PatternCraft.app account</a> ·
+        Step 3: Upload your art and generate your own pattern.
       </div>
       <div class="badge-row">
-        <span class="badge">Free sample pattern</span>
-        <span class="badge">Email-gated access to the tool</span>
+        <span class="badge">One pattern included with every account</span>
+        <span class="badge">Designed for hobbyists & pattern sellers</span>
       </div>
     </div>
 
@@ -659,10 +771,10 @@ HOMEPAGE_HTML = r"""
   </div>
 
   <div id="make" class="card">
-    <h2 class="section-title">Make a pattern (access required)</h2>
+    <h2 class="section-title">Make a pattern</h2>
     <p class="muted">
-      You’ll see the controls here, but you need to <a href="/access">submit your email</a> or
-      <a href="/login">log in as a subscriber</a> before PatternCraft.app will generate a pattern ZIP.
+      Create a PatternCraft.app account or log in to generate patterns. Every account includes one pattern on us.
+      After that, plans on the pricing page keep you creating.
     </p>
     <div class="make-layout">
       <div class="make-main">
@@ -676,11 +788,13 @@ HOMEPAGE_HTML = r"""
               </div>
             </div>
           </label>
+
           <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap">
             <div class="free-note">
               <div class="free-dot"></div>
               <span>
-                First time here? <a href="/access">Create free access with your email</a> to unlock the tool.
+                New here? <a href="/signup">Create your account</a>.
+                Already joined? <a href="/login">Log in</a>.
               </span>
             </div>
           </div>
@@ -705,7 +819,7 @@ HOMEPAGE_HTML = r"""
                 <select id="stitch_style" name="stitch_style"></select>
               </label>
             </div>
-            <p class="controls-note">Use the defaults if you’re not sure — they work well for most art.</p>
+            <p class="controls-note">Defaults work well for most art. Adjust once you know your style.</p>
           </fieldset>
 
           <fieldset id="crossKnitBlock">
@@ -743,7 +857,7 @@ HOMEPAGE_HTML = r"""
           <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <button class="pill" type="submit">Generate pattern ZIP</button>
             <span class="muted">
-              Pattern generation will only run after you’ve created access or logged in.
+              Your download includes grid.png, legend.csv, meta.json, and optional pattern.pdf or embroidery files.
             </span>
           </div>
         </form>
@@ -827,13 +941,13 @@ HOMEPAGE_HTML = r"""
 </html>
 """
 
-# ---------------------- INLINE HTML: ACCESS / LOGIN / PRICING ----------------------
-ACCESS_HTML = r"""
+# ---------------------- INLINE HTML: SIGNUP / LOGIN / PRICING ----------------------
+SIGNUP_HTML = r"""
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Get access — PatternCraft.app</title>
+  <title>Create your account — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body{margin:0;background:#F7F4EF;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#111827}
@@ -842,11 +956,11 @@ ACCESS_HTML = r"""
     h1{margin:0 0 10px;font-size:1.6rem}
     .muted{font-size:13px;color:#6b7280}
     label{display:block;font-size:13px;margin-top:12px}
-    input[type="email"]{
+    input[type="email"],input[type="password"]{
       width:100%;margin-top:4px;padding:8px 10px;border-radius:10px;
       border:1px solid #cbd5e1;font-size:14px;
     }
-    input[type="email"]:focus{
+    input:focus{
       outline:none;border-color:#4f46e5;box-shadow:0 0 0 1px rgba(79,70,229,.35);
     }
     .pill{
@@ -865,27 +979,32 @@ ACCESS_HTML = r"""
 <body>
 <div class="wrap">
   <div class="card">
-    <h1>Get access to PatternCraft.app</h1>
+    <h1>Create your PatternCraft.app account</h1>
     <p class="muted">
-      Before you use the tool, PatternCraft.app shows you an example pattern and asks for your email.
-      This keeps abuse down and lets us share occasional updates and new pattern ideas.
+      Every account includes one pattern on us. Your account lets you come back later,
+      use different devices, and upgrade to a plan when you’re ready.
     </p>
     <ul>
-      <li>Step 1: <a href="/">View the sample pattern and instructions</a></li>
-      <li>Step 2: Enter your email below</li>
-      <li>Step 3: Use the tool from this browser without hitting the paywall again</li>
+      <li>Use your best email — we’ll send occasional pattern ideas and updates.</li>
+      <li>Choose a password you’ll remember; you’ll use it to log back in.</li>
     </ul>
-    <form method="POST" action="/access">
-      <label>Email for access
+    <form method="POST" action="/signup">
+      <label>Email
         <input type="email" name="email" placeholder="you@example.com" required>
       </label>
-      <button class="pill" type="submit">Unlock PatternCraft.app</button>
+      <label>Password (min 8 characters)
+        <input type="password" name="password" required>
+      </label>
+      <label>Confirm password
+        <input type="password" name="confirm" required>
+      </label>
+      <button class="pill" type="submit">Create account</button>
     </form>
     {% if message %}
       <div class="msg">{{ message }}</div>
     {% endif %}
     <p class="muted" style="margin-top:10px;">
-      Already a subscriber? <a href="/login">Log in here</a> to bypass the email gate.
+      Already set this up? <a href="/login">Log in instead</a>.
     </p>
   </div>
 </div>
@@ -898,7 +1017,7 @@ LOGIN_HTML = r"""
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Subscriber login — PatternCraft.app</title>
+  <title>Log in — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body{margin:0;background:#F7F4EF;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#111827}
@@ -929,25 +1048,24 @@ LOGIN_HTML = r"""
 <body>
 <div class="wrap">
   <div class="card">
-    <h1>Subscriber login</h1>
+    <h1>Log in to PatternCraft.app</h1>
     <p class="muted">
-      If you have a paid subscription, enter the access code you received after checkout.
-      This will bypass the email paywall for this browser.
+      Use the email and password you created when you first tried PatternCraft.app.
     </p>
     <form method="POST" action="/login">
       <label>Email
         <input type="email" name="email" placeholder="you@example.com" required>
       </label>
-      <label>Access code
-        <input type="text" name="code" placeholder="Paste your subscriber code" required>
+      <label>Password
+        <input type="password" name="password" required>
       </label>
-      <button class="pill" type="submit">Log in as subscriber</button>
+      <button class="pill" type="submit">Log in</button>
     </form>
     {% if message %}
       <div class="msg">{{ message }}</div>
     {% endif %}
     <p class="muted" style="margin-top:10px;">
-      Just trying PatternCraft.app? <a href="/access">Get email-based access instead</a>.
+      New to PatternCraft.app? <a href="/signup">Create an account</a>.
     </p>
   </div>
 </div>
@@ -972,30 +1090,34 @@ PRICING_HTML = r"""
     .muted{color:#6b6b6b;font-size:13px}
     .btn{display:inline-block;margin-top:10px;padding:8px 14px;border-radius:999px;
          background:#222;color:#fff;text-decoration:none;font-size:14px}
+    .msg{margin-bottom:12px;font-size:13px;color:#b91c1c}
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>PatternCraft.app pricing</h1>
-  <p class="muted">Try PatternCraft.app, then upgrade only if it becomes part of your creative workflow.</p>
+  {% if message %}
+    <div class="msg">{{ message }}</div>
+  {% endif %}
+  <p class="muted">Start with your included pattern, then choose a plan if PatternCraft.app becomes part of your workflow.</p>
   <div class="plans">
     <div class="card">
-      <div class="price">Free — try us out</div>
+      <div class="price">Included with every account</div>
       <ul class="muted">
-        <li>1 free PatternCraft.app pattern conversion</li>
+        <li>1 PatternCraft.app pattern conversion</li>
         <li>All stitch types included</li>
-        <li>Try us out, join our us for annual newsletter</li>
+        <li>Annual newsletter with pattern ideas</li>
       </ul>
-      <a href="/access" class="btn">Get email access</a>
+      <a href="/signup" class="btn">Create account</a>
     </div>
     <div class="card">
       <div class="price">$5 / 10 patterns</div>
       <ul class="muted">
         <li>Pay once, use whenever</li>
         <li>Great for small projects</li>
-        <li>Credits never expire (future)</li>
+        <li>Credits model (implementation coming soon)</li>
       </ul>
-      <a href="#" class="btn">Coming soon</a>
+      <a href="/signup" class="btn">Join waitlist</a>
     </div>
     <div class="card">
       <div class="price">$20 / month</div>
@@ -1004,7 +1126,7 @@ PRICING_HTML = r"""
         <li>Priority processing</li>
         <li>Ideal for shops & power users</li>
       </ul>
-      <a href="#" class="btn">Coming soon</a>
+      <a href="/signup" class="btn">Join waitlist</a>
     </div>
     <div class="card">
       <div class="price">$100 / year</div>
@@ -1013,7 +1135,7 @@ PRICING_HTML = r"""
         <li>Best value for frequent makers</li>
         <li>No monthly billing</li>
       </ul>
-      <a href="#" class="btn">Coming soon</a>
+      <a href="/signup" class="btn">Join waitlist</a>
     </div>
   </div>
 </div>
@@ -1024,3 +1146,4 @@ PRICING_HTML = r"""
 if __name__ == "__main__":
     # Local dev; on Render use: gunicorn app:app --bind 0.0.0.0:$PORT
     app.run(host="127.0.0.1", port=5050, debug=True)
+
