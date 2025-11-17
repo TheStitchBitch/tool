@@ -4,6 +4,7 @@ import json
 import math
 import os
 import zipfile
+import base64
 from typing import Dict, Tuple, List, Optional
 
 from flask import (
@@ -30,10 +31,10 @@ except Exception:
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-# Where we store users (very simple JSON "database")
+# Simple JSON “database” for users
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 
-# ---------------------- CONFIG ----------------------
+# Config
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
@@ -43,7 +44,6 @@ MAX_DIM = 8000  # max width/height in pixels
 
 # ---------------------- USER STORAGE ----------------------
 def load_users() -> Dict[str, dict]:
-    """Load users from JSON file."""
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -57,7 +57,6 @@ def load_users() -> Dict[str, dict]:
 
 
 def save_users(users: Dict[str, dict]) -> None:
-    """Safely save users to JSON file."""
     tmp = USERS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(users, f, indent=2)
@@ -239,7 +238,7 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
         last: Optional[Tuple[int, int]] = None
         for (x, y) in paths:
             if last is None:
-                pat.add_stitch_absolute(0, 0, 2)  # move
+                pat.add_stitch_absolute(0, 0, 2)
             pat.add_stitch_absolute(x, y)
             last = (x, y)
         pat.end()
@@ -252,7 +251,7 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# ---------------------- ROUTES: BASIC ----------------------
+# ---------------------- BASIC ROUTES ----------------------
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -272,7 +271,7 @@ def on_error(_e):
 @app.get("/")
 def index() -> str:
     user = get_current_user()
-    return render_template_string(HOMEPAGE_HTML, user=user)
+    return render_template_string(HOMEPAGE_HTML, user=user, sample_preview=None, sample_error=None)
 
 
 @app.get("/pricing")
@@ -285,7 +284,7 @@ def pricing() -> str:
     return render_template_string(PRICING_HTML, user=user, message=message)
 
 
-# ---------------------- ROUTES: SIGNUP / LOGIN ----------------------
+# ---------------------- SIGNUP / LOGIN ----------------------
 @app.get("/signup")
 def signup() -> str:
     user = get_current_user()
@@ -371,7 +370,57 @@ def logout():
     return redirect(url_for("index"))
 
 
-# ---------------------- ROUTE: CONVERT (ONE FREE PATTERN PER EMAIL) ----------------------
+# ---------------------- SAMPLE PREVIEW (FREE, ON-PAGE) ----------------------
+@app.post("/sample-preview")
+def sample_preview():
+    """Allow anyone to upload a sample image and see a preview grid inline on the homepage."""
+    user = get_current_user()
+    file = request.files.get("sample_file")
+    if not file:
+        return render_template_string(
+            HOMEPAGE_HTML,
+            user=user,
+            sample_preview=None,
+            sample_error="Please upload an image to preview.",
+        )
+    try:
+        img = open_image(file)
+    except Exception:
+        return render_template_string(
+            HOMEPAGE_HTML,
+            user=user,
+            sample_preview=None,
+            sample_error="Could not read that image. Try a PNG or JPG.",
+        )
+    if max(img.size) > MAX_DIM:
+        return render_template_string(
+            HOMEPAGE_HTML,
+            user=user,
+            sample_preview=None,
+            sample_error=f"Image is too large. Try something under {MAX_DIM}px on a side.",
+        )
+
+    # Lightweight preview defaults
+    stitch_w = 80
+    max_colors = 12
+    small = resize_for_stitch_width(img, stitch_w)
+    quant = quantize(small, max_colors)
+    grid_img = draw_grid(quant, cell_px=10)
+
+    buf = io.BytesIO()
+    grid_img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    data_url = f"data:image/png;base64,{b64}"
+
+    return render_template_string(
+        HOMEPAGE_HTML,
+        user=user,
+        sample_preview=data_url,
+        sample_error=None,
+    )
+
+
+# ---------------------- PATTERN GENERATOR (ACCOUNT-GATED) ----------------------
 @app.post("/api/convert")
 def convert():
     # Require an account
@@ -400,7 +449,6 @@ def convert():
             # Let this pattern go through; after success we mark as used
             mark_free_used = True
 
-    # Normal convert logic
     file = request.files.get("file")
     if not file:
         return jsonify({"error": "missing_file"}), 400
@@ -616,7 +664,7 @@ HOMEPAGE_HTML = r"""
     .sample-card{border-radius:14px;border:1px solid var(--line);padding:10px;background:#fff;box-shadow:0 6px 18px rgba(15,23,42,.08)}
     .sample-label{font-weight:600;font-size:13px;margin-bottom:6px}
     .sample-art{border-radius:12px;overflow:hidden;background:#0f172a}
-    .sample-art img{width:100%;display:block;object-fit:cover;max-height:220px}
+    .sample-art img{width:100%;display:block;object-fit:cover;max-height:260px}
     .sample-pattern{
       border-radius:12px;border:1px solid #e5e7eb;
       background-image:
@@ -683,6 +731,10 @@ HOMEPAGE_HTML = r"""
     label{font-size:13px}
     .controls-note{font-size:11px;color:#94a3b8;margin-top:4px}
     .hidden{display:none}
+    .error-banner{
+      margin-top:8px;font-size:12px;color:#b91c1c;background:#fee2e2;
+      border-radius:8px;padding:6px 8px;
+    }
     @media (max-width:860px){
       .hero{grid-template-columns:1fr}
       .sample-grid{grid-template-columns:1fr}
@@ -756,16 +808,41 @@ HOMEPAGE_HTML = r"""
         </div>
         <div class="sample-note">
           A colorful autumn-inspired illustration — the kind of art people turn into quilts, pillows,
-          wall hangings, and stitch samplers.
+          wall hangings, and stitch samplers. You can also upload your own art below to see a live preview.
         </div>
       </div>
       <div class="sample-card">
         <div class="sample-label">Pattern out (preview)</div>
-        <div class="sample-pattern"></div>
-        <div class="sample-note">
-          PatternCraft.app turns artwork like this into a printable grid with symbols, a color legend,
-          and an optional PDF layout — the same structure you get when you generate your own pattern.
-        </div>
+        {% if sample_preview %}
+          <div class="sample-art">
+            <img src="{{ sample_preview }}" alt="PatternCraft.app sample pattern preview">
+          </div>
+          <div class="sample-note">
+            This preview was generated from the artwork you just uploaded — a live view of how PatternCraft.app
+            converts images into a stitchable grid.
+          </div>
+        {% else %}
+          <div class="sample-pattern"></div>
+          <div class="sample-note">
+            PatternCraft.app turns artwork into a printable grid with symbols, a color legend, and an optional PDF layout —
+            the same structure you get when you generate your own pattern.
+          </div>
+        {% endif %}
+        <form method="POST" action="/sample-preview" enctype="multipart/form-data" style="margin-top:10px;">
+          <label class="file">
+            <input type="file" name="sample_file" accept="image/*" required>
+            <div>
+              <div class="file-label-main">TRY A FREE PREVIEW</div>
+              <div class="file-label-sub">
+                Upload a sample image and see the pattern preview right here on the page.
+              </div>
+            </div>
+          </label>
+          <button class="pill pill-secondary" type="submit" style="margin-top:8px;">Show preview above</button>
+        </form>
+        {% if sample_error %}
+          <div class="error-banner">{{ sample_error }}</div>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -869,8 +946,8 @@ HOMEPAGE_HTML = r"""
           <div class="sample-pattern"></div>
           <div class="sample-note" style="margin-top:6px;">
             See a finished export before uploading anything:
-            download a <strong>free sample pattern ZIP</strong> generated from the leaf artwork above —
-            formatted exactly like a real PatternCraft.app export.
+            download a <strong>free sample pattern ZIP</strong>
+            generated from the leaf artwork above — formatted exactly like a real PatternCraft.app export.
           </div>
           <button type="button" class="pill pill-secondary" style="margin-top:10px;"
                   onclick="window.location.href='/static/sample-pattern.zip';">
