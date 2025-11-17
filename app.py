@@ -146,8 +146,9 @@ def draw_grid(base: Image.Image, cell_px: int) -> Image.Image:
 
 def add_strong_watermark(img: Image.Image) -> Image.Image:
     """
-    Overlay a dense, diagonal text watermark so the free preview
+    Overlay a dense diagonal watermark so the free preview
     is not practically usable as a working pattern.
+    Applied only to the on-page preview sample.
     """
     wm = img.convert("RGBA")
     w, h = wm.size
@@ -174,10 +175,10 @@ def add_strong_watermark(img: Image.Image) -> Image.Image:
     rw, rh = rotated.size
     left = (rw - w) // 2
     top = (rh - h) // 2
-    text_crop = rotated.crop((left, top, left + w, top + h))
+    crop = rotated.crop((left, top, left + w, top + h))
 
-    watermarked = Image.alpha_composite(wm, text_crop)
-    return watermarked.convert("RGB")
+    result = Image.alpha_composite(wm, crop)
+    return result.convert("RGB")
 
 
 def assign_symbols(colors: List[Tuple[int, int, int]]) -> Dict[Tuple[int, int, int], str]:
@@ -358,7 +359,6 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        # subscription types can be: "free", "pro_monthly", "pro_yearly", "pro_unlimited", etc.
         "subscription": "free",
         "free_used": False,
     }
@@ -405,7 +405,7 @@ def logout():
     return redirect(url_for("index"))
 
 
-# ---------------------- SAMPLE PREVIEW (FREE, ON-PAGE) ----------------------
+# ---------------------- SAMPLE PREVIEW (FREE, ON-PAGE, WATERMARKED) ----------------------
 @app.post("/sample-preview")
 def sample_preview():
     """Allow anyone to upload a sample image and see a watermarked preview grid inline on the homepage."""
@@ -442,7 +442,7 @@ def sample_preview():
     quant = quantize(small, max_colors)
     grid_img = draw_grid(quant, cell_px=10)
 
-    # Apply watermark ONLY to the free preview sample
+    # Apply strong watermark ONLY to this sample preview
     grid_img = add_strong_watermark(grid_img)
 
     buf = io.BytesIO()
@@ -458,65 +458,86 @@ def sample_preview():
     )
 
 
-# ---------------------- SAMPLE ZIP (KNITTING PATTERN) ----------------------
-@app.get("/sample-zip")
-def sample_zip():
+# ---------------------- FREE SAMPLE QUILT PATTERN ZIP (ROUTE STILL AVAILABLE) ----------------------
+@app.get("/sample-pattern.zip")
+def sample_pattern_zip():
     """
-    Serve a free sample PatternCraft.app ZIP:
-    - Knitting chart
-    - grid.png with symbols
-    - legend.csv with colors + symbols
-    - meta.json
+    Serve a sample quilt-style pattern ZIP with a grid and legend.
+    Uses a synthetic patchwork-style chart generated in code.
     """
-    # Simple synthetic knit-style image (striped bands)
-    width, height = 32, 24
-    img = Image.new("RGB", (width, height))
-    draw = ImageDraw.Draw(img)
+    # Create a small quilt-style patchwork image
+    w, h = 40, 40
+    base = Image.new("RGB", (w, h), (245, 245, 245))
+    draw = ImageDraw.Draw(base)
     colors = [
-        (219, 234, 254),  # light blue
-        (248, 250, 252),  # almost white
-        (251, 191, 36),   # amber
-        (248, 113, 22),   # orange
+        (239, 68, 68),    # red
+        (249, 115, 22),   # orange
+        (234, 179, 8),    # gold
+        (34, 197, 94),    # green
+        (59, 130, 246),   # blue
     ]
-    for y in range(height):
-        for x in range(width):
-            band = (y // 6) % len(colors)
-            draw.point((x, y), fill=colors[band])
 
-    # Treat as knitting pattern
-    stitch_w = width
+    patch = 8  # size of each quilt block in pixels
+    for py in range(0, h, patch):
+        for px in range(0, w, patch):
+            block_idx = (px // patch + py // patch) % len(colors)
+            base_color = colors[block_idx]
+            alt_color = colors[(block_idx + 2) % len(colors)]
+
+            # Different block styles for a “quilt” feel
+            style = (px // patch + 2 * (py // patch)) % 3
+
+            if style == 0:
+                # Solid block
+                draw.rectangle((px, py, px + patch - 1, py + patch - 1), fill=base_color)
+            elif style == 1:
+                # Diagonal half-square triangle
+                for y in range(patch):
+                    for x in range(patch):
+                        if x >= y:
+                            draw.point((px + x, py + y), fill=base_color)
+                        else:
+                            draw.point((px + x, py + y), fill=alt_color)
+            else:
+                # Stripes inside block
+                for y in range(patch):
+                    color = base_color if y % 2 == 0 else alt_color
+                    draw.line((px, py + y, px + patch - 1, py + y), fill=color)
+
+    # Treat as a quilt-style cross-stitch chart
     max_colors = len(colors)
-    quant = quantize(img, max_colors)
+    quant = quantize(base, max_colors)
     counts = palette_counts(quant)
     sx, sy = quant.size
-    cloth_count = 20
+
+    cloth_count = 10
     strands = 2
     waste_pct = 20
+    finished_w_in = round(sx / float(cloth_count), 2)
+    finished_h_in = round(sy / float(cloth_count), 2)
 
+    # Symbol grid
     grid_img = draw_grid(quant, cell_px=CELL_PX)
     pal = sorted(counts.keys(), key=lambda c: counts[c], reverse=True)
     sym_map = assign_symbols(pal)
     sym_img = draw_symbols_on_grid(quant, cell_px=CELL_PX, sym_map=sym_map)
-
-    finished_w_in = round(sx / float(cloth_count), 2)
-    finished_h_in = round(sy / float(cloth_count), 2)
+    grid_img = sym_img
 
     out_zip = io.BytesIO()
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
-        # legend.csv with symbol column
-        total = sum(counts.values()) or 1
-        lines = ["hex,r,g,b,stitches,percent,skeins_est,symbol"]
+        # legend.csv with color counts and skein estimates
+        total_stitches = sum(counts.values()) or 1
+        lines = ["hex,r,g,b,stitches,percent,skeins_est"]
         for (r, g, b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
             skeins = skeins_per_color(c, cloth_count, strands, waste_pct / 100.0)
-            symbol = sym_map[(r, g, b)]
             lines.append(
-                f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total):.2f},{skeins:.2f},{symbol}"
+                f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total_stitches):.2f},{skeins:.2f}"
             )
         z.writestr("legend.csv", "\n".join(lines))
 
         meta = {
-            "type": "knit",
-            "stitch_style": "stockinette",
+            "type": "quilt_sample",
+            "stitch_style": "patchwork",
             "stitches_w": sx,
             "stitches_h": sy,
             "colors": len(counts),
@@ -524,12 +545,12 @@ def sample_zip():
             "strands": strands,
             "waste_percent": waste_pct,
             "finished_size_in": [finished_w_in, finished_h_in],
-            "notes": "Sample PatternCraft.app knitting export with legend and symbol chart.",
+            "notes": "Sample quilt-style color grid generated by PatternCraft.app with grid.png and legend.csv.",
         }
         z.writestr("meta.json", json.dumps(meta, indent=2))
 
         buf_png = io.BytesIO()
-        sym_img.save(buf_png, format="PNG")
+        grid_img.save(buf_png, format="PNG")
         z.writestr("grid.png", buf_png.getvalue())
 
     out_zip.seek(0)
@@ -537,11 +558,11 @@ def sample_zip():
         out_zip,
         mimetype="application/zip",
         as_attachment=True,
-        download_name="patterncraft_sample_knit.zip",
+        download_name="patterncraft_sample_quilt.zip",
     )
 
 
-# ---------------------- PATTERN GENERATOR (ACCOUNT-GATED) ----------------------
+# ---------------------- PATTERN GENERATOR (ACCOUNT-GATED, CLEAN OUTPUT) ----------------------
 @app.post("/api/convert")
 def convert():
     # Require an account
@@ -558,7 +579,6 @@ def convert():
     subscription = user.get("subscription", "free")
     mark_free_used = False
 
-    # Decide if this account is allowed to generate another pattern
     if subscription in ("pro_monthly", "pro_yearly", "pro_unlimited"):
         pass
     else:
@@ -811,7 +831,7 @@ HOMEPAGE_HTML = r"""
     }
     .sample-note{font-size:12px;color:var(--muted);margin-top:6px}
     .section-title{font-size:1.1rem;margin-bottom:6px}
-    .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+    .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.2fr)}
     .file{
       border:2px dashed var(--accent);
       border-radius:18px;
@@ -918,27 +938,31 @@ HOMEPAGE_HTML = r"""
   <div id="how" class="card" style="margin-bottom:24px">
     <h2 class="section-title">See a PatternCraft.app conversion</h2>
     <div class="sample-grid">
+
       <div class="sample-card">
         <div class="sample-label">Artwork in</div>
-        <form method="POST" action="/sample-preview" enctype="multipart/form-data" style="margin-top:4px;">
+        <form method="POST" action="/sample-preview" enctype="multipart/form-data">
           <label class="file">
-            <input type="file" name="sample_file" accept="image/*" required onchange="pickFile(this)">
+            <input type="file" name="sample_file" accept="image/*" required>
             <div>
               <div class="file-label-main">TRY A FREE PREVIEW</div>
               <div class="file-label-sub">
-                Upload a sample image and PatternCraft.app will turn it into a stitchable grid preview.
+                Upload a sample image — we’ll convert it and show the pattern on the right.
               </div>
             </div>
           </label>
-          <button class="pill pill-secondary" type="submit" style="margin-top:8px;">Show preview on the right</button>
+          <button class="pill pill-secondary" type="submit" style="margin-top:8px;">
+            See pattern preview
+          </button>
         </form>
         {% if sample_error %}
-          <div class="error-banner">{{ sample_error }}</div>
+          <div class="error-banner" style="margin-top:8px;">{{ sample_error }}</div>
         {% endif %}
-        <div class="sample-note">
-          Drop in art you might use for cross-stitch, knitting, or quilting. The preview will appear in the panel next to this one.
+        <div class="sample-note" style="margin-top:8px;">
+          This on-page preview is for demonstration only. Your full, clean pattern comes from the ZIP you generate below.
         </div>
       </div>
+
       <div class="sample-card">
         <div class="sample-label">Pattern out (preview)</div>
         {% if sample_preview %}
@@ -946,17 +970,16 @@ HOMEPAGE_HTML = r"""
             <img src="{{ sample_preview }}" alt="PatternCraft.app sample pattern preview">
           </div>
           <div class="sample-note">
-            This preview was generated from the artwork you just uploaded and is heavily watermarked so it
-            cannot be used as a working pattern. Downloads you create from your account are clean.
+            This watermarked grid is a live rendering of your upload. Exports from your account are clean and ready to stitch.
           </div>
         {% else %}
           <div class="sample-pattern"></div>
           <div class="sample-note">
-            PatternCraft.app turns artwork into a printable grid with symbols, a color legend, and an optional PDF layout —
-            the same structure you get when you generate your own pattern.
+            Once you upload art on the left, we’ll show the stitched grid here.
           </div>
         {% endif %}
       </div>
+
     </div>
   </div>
 
@@ -1051,22 +1074,6 @@ HOMEPAGE_HTML = r"""
             </span>
           </div>
         </form>
-      </div>
-
-      <div class="make-sample">
-        <div class="sample-card">
-          <div class="sample-label">Free sample pattern ZIP</div>
-          <div class="sample-pattern"></div>
-          <div class="sample-note" style="margin-top:6px;">
-            See a finished export before uploading anything:
-            download a <strong>free sample knitting pattern ZIP</strong>
-            generated in the same format as a real PatternCraft.app export — including grid.png and legend.csv.
-          </div>
-          <button type="button" class="pill pill-secondary" style="margin-top:10px;"
-                  onclick="window.location.href='/sample-zip';">
-            Download sample ZIP
-          </button>
-        </div>
       </div>
     </div>
   </div>
