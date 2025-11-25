@@ -32,24 +32,24 @@ except Exception:
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-# Stripe configuration (SECRET KEY MUST BE SET IN RENDER ENV VARS)
+# ---------------------- STRIPE CONFIG ----------------------
+# STRIPE_SECRET_KEY must be set in Render's environment for this to work.
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
-# Stripe live price IDs (from your live-mode export)
+# LIVE Stripe price IDs (from your latest live Stripe export: prices (4).csv)
 # Products:
-#   Single Pattern        -> price_1SXC552EltyWEGkhnT1exvQV (prod_TUAPTxClBqGsUg)
-#   10 Pattern Pack       -> price_1SXCBW2EltyWEGkhcBE1KwPW (prod_TUAWUoY8VJQ2Wd)
-#   3 Month Unlimited     -> price_1SXCJK2EltyWEGkhWnoupSSf (prod_TUAeCZ6jEo0ifj)
-#   Pro Annual            -> price_1SXCEq2EltyWEGkhoOIFpb1w (prod_TUAZyQAc4sgEse)
-STRIPE_PRICE_SINGLE = "price_1SXC552EltyWEGkhnT1exvQV"      # Single Pattern – $25
-STRIPE_PRICE_PACK10 = "price_1SXCBW2EltyWEGkhcBE1KwPW"      # 10 Pattern Pack – $60
-STRIPE_PRICE_3MO    = "price_1SXCJK2EltyWEGkhWnoupSSf"      # 3 Month Unlimited – $75/month
-STRIPE_PRICE_ANNUAL = "price_1SXCEq2EltyWEGkhoOIFpb1w"      # Pro Annual – $99/year
+#   Single Pattern        -> price_1SXNyWCINTImVye2jayzoKKj (prod_TUMhcJiibgd9z5)
+#   10 Pattern Pack       -> price_1SXNyRCINTImVye2m433u7pL (prod_TUMh9Nfcm08vNI)
+#   Pro Annual            -> price_1SXNyNCINTImVye2rcxl5LsO (prod_TUMhjLGGj3nKGs)
+#   3 Month Unlimited     -> price_1SXNyFCINTImVye2awgikQHW (prod_TUMhNhtU3aR9Px)
+STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"      # Single Pattern – $25
+STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"      # 10 Pattern Pack – $60
+STRIPE_PRICE_3MO    = "price_1SXNyFCINTImVye2awgikQHW"      # 3 Month Unlimited – $75/month
+STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"      # Pro Annual – $99/year
 
-# Simple JSON “database” for users
+# ---------------------- SIMPLE "DB" ----------------------
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 
-# Config
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
@@ -57,7 +57,6 @@ CELL_PX = 12
 MAX_DIM = 8000  # max width/height in pixels
 
 
-# ---------------------- USER STORAGE ----------------------
 def load_users() -> Dict[str, dict]:
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -580,6 +579,10 @@ def convert():
     mark_free_used = False
     consume_credit = False
 
+    # Membership logic:
+    # - unlimited_3m / unlimited_year: unlimited usage
+    # - if credits > 0: consume 1 credit per convert
+    # - else: free tier, 1 pattern per account
     if subscription in ("unlimited_3m", "unlimited_year"):
         pass
     elif credits > 0:
@@ -1338,7 +1341,7 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       <p class="small">Best for one-off projects or trying PatternCraft.app.</p>
     </div>
 
-    <!-- 10-Pattern Pack -->
+    <!-- 10 Pattern Pack -->
     <div class="card">
       <h3>10 Pattern Pack</h3>
       <div class="price">$60</div>
@@ -1357,7 +1360,7 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       <p class="small">Save vs buying single patterns individually.</p>
     </div>
 
-    <!-- 3-Month Unlimited -->
+    <!-- 3 Month Unlimited -->
     <div class="card">
       <h3>3 Month Unlimited</h3>
       <div class="price">$75 / month</div>
