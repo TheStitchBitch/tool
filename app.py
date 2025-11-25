@@ -41,7 +41,7 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 # Stripe price IDs (LIVE – from your latest CSV)
 STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"      # Single Pattern – $25
 STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"      # 10 Pattern Pack – $60
-STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"         # 3-Month Unlimited – $75 (expected one-time)
+STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"         # 3-Month Unlimited – $75 every 3 months
 STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"      # Pro Annual – $99/year
 
 # Simple JSON “database” for users
@@ -300,7 +300,6 @@ def too_large(_e):
 
 @app.errorhandler(Exception)
 def on_error(e):
-    # Don’t leak internal details in production
     app.logger.exception("Unhandled error: %s", e)
     return make_response(jsonify({"error": "server_error"}), 500)
 
@@ -338,7 +337,7 @@ def pricing() -> str:
 def create_checkout():
     """
     Create a Stripe Checkout Session for the selected plan.
-    Treats Single, Pack10, 3-Month as one-time payments; Annual as subscription.
+    Single, Pack10: one-time payments; 3-Month + Annual: subscriptions.
     """
     email = session.get("user_email")
     if not email:
@@ -359,7 +358,7 @@ def create_checkout():
         mode = "payment"
     elif plan == "unlimited_3m":
         price_id = STRIPE_PRICE_3MO
-        mode = "payment"  # expects a one-time 75 USD price in Stripe
+        mode = "subscription"  # 3‑month recurring subscription
     elif plan == "unlimited_year":
         price_id = STRIPE_PRICE_ANNUAL
         mode = "subscription"
@@ -425,7 +424,6 @@ def success():
     users = load_users()
     stored = users.get(email)
     if not stored:
-        # Create a basic account shell if somehow missing
         stored = {
             "email": email,
             "password_hash": "",
@@ -452,7 +450,6 @@ def success():
     users[email] = stored
     save_users(users)
 
-    # Refresh session user
     session["user_email"] = email
     user = get_current_user()
 
@@ -504,7 +501,7 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "free",  # free, single, pack10, unlimited_3m, unlimited_year
+        "subscription": "free",
         "free_used": False,
         "credits": 0,
         "membership_expires": None,
@@ -587,28 +584,23 @@ def logout():
 
 @app.get("/sample-pattern.zip")
 def sample_pattern_zip():
-    """
-    Serve a sample quilt-style pattern ZIP with a grid and legend.
-    Uses a synthetic patchwork-style chart generated in code.
-    """
     w, h = 40, 40
     base = Image.new("RGB", (w, h), (245, 245, 245))
     draw = ImageDraw.Draw(base)
     colors = [
-        (239, 68, 68),  # red
-        (249, 115, 22),  # orange
-        (234, 179, 8),  # gold
-        (34, 197, 94),  # green
-        (59, 130, 246),  # blue
+        (239, 68, 68),
+        (249, 115, 22),
+        (234, 179, 8),
+        (34, 197, 94),
+        (59, 130, 246),
     ]
 
-    patch = 8  # size of each quilt block in pixels
+    patch = 8
     for py in range(0, h, patch):
         for px in range(0, w, patch):
             block_idx = (px // patch + py // patch) % len(colors)
             base_color = colors[block_idx]
             alt_color = colors[(block_idx + 2) % len(colors)]
-
             style = (px // patch + 2 * (py // patch)) % 3
 
             if style == 0:
@@ -688,7 +680,6 @@ def sample_pattern_zip():
 
 @app.post("/api/convert")
 def convert():
-    # Require an account
     email = session.get("user_email")
     if not email:
         return redirect(url_for("login", msg="Log in to generate patterns."))
@@ -706,10 +697,6 @@ def convert():
     mark_free_used = False
     consume_credit = False
 
-    # Membership logic:
-    # - unlimited_3m / unlimited_year: unlimited usage while active
-    # - if credits > 0: consume 1 credit per convert
-    # - else: free tier, 1 pattern per account
     if is_membership_active(user):
         pass
     elif credits > 0:
@@ -834,9 +821,7 @@ def convert():
         else:
             return jsonify({"error": "unknown_ptype"}), 400
 
-    # Update membership usage
     if is_membership_active(user):
-        # Unlimited plans: no free_used / credits changes
         pass
     else:
         if consume_credit and credits > 0:
@@ -1505,10 +1490,10 @@ footer{border-top:1px solid var(--line);margin-top:24px}
     <!-- 3-Month Unlimited -->
     <div class="card">
       <h3>3-Month Unlimited</h3>
-      <div class="price">$75 one-time</div>
-      <p class="small">$75 for 3 months of unlimited patterns.</p>
+      <div class="price">$75 every 3 months</div>
+      <p class="small">Recurring charge of $75 every 3 months for unlimited patterns.</p>
       <ul class="list">
-        <li>Unlimited pattern conversions for 3 months</li>
+        <li>Unlimited pattern conversions</li>
         <li>Highest-quality output (4× resolution)</li>
         <li>Advanced color tools</li>
         <li>Priority processing</li>
@@ -1518,7 +1503,7 @@ footer{border-top:1px solid var(--line);margin-top:24px}
         <input type="hidden" name="plan" value="unlimited_3m">
         <button class="btn ghost" type="submit">Start 3-Month Unlimited</button>
       </form>
-      <p class="small">One payment, 3 months of Pro access.</p>
+      <p class="small">Renews every 3 months until you cancel.</p>
     </div>
 
     <!-- Annual Pro Unlimited -->
@@ -1636,4 +1621,3 @@ SUCCESS_HTML = r"""
 
 if __name__ == "__main__":
     app.run(debug=True)
-
