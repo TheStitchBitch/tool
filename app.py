@@ -41,6 +41,12 @@ STRIPE_PRICE_PACK10 = "price_1SXCBW2EltyWEGkhcBE1KwPW"      # 10 Pattern Pack �
 STRIPE_PRICE_3MO    = "price_1SXCJK2EltyWEGkhWnoupSSf"      # 3 Month Unlimited – $75/month
 STRIPE_PRICE_ANNUAL = "price_1SXCEq2EltyWEGkhoOIFpb1w"      # Pro Annual – $99/year
 
+# Stripe product IDs (active products)
+STRIPE_PRODUCT_3MO    = "prod_TUAeCZ6jEo0ifj"   # 3 Month Unlimited
+STRIPE_PRODUCT_ANNUAL = "prod_TUAZyQAc4sgEse"   # Pro Annual
+STRIPE_PRODUCT_PACK10 = "prod_TUAWUoY8VJQ2Wd"   # 10 Pattern Pack
+STRIPE_PRODUCT_SINGLE = "prod_TUAPTxClBqGsUg"   # Single Pattern
+
 # Simple JSON “database” for users
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 
@@ -310,17 +316,22 @@ def create_checkout():
 
     plan = (request.form.get("plan") or "").strip()
 
+    # map plan -> price + product
     if plan == "single":
         price_id = STRIPE_PRICE_SINGLE
+        product_id = STRIPE_PRODUCT_SINGLE
         mode = "payment"
     elif plan == "pack10":
         price_id = STRIPE_PRICE_PACK10
+        product_id = STRIPE_PRODUCT_PACK10
         mode = "payment"
     elif plan == "unlimited_3m":
         price_id = STRIPE_PRICE_3MO
+        product_id = STRIPE_PRODUCT_3MO
         mode = "subscription"
     elif plan == "unlimited_year":
         price_id = STRIPE_PRICE_ANNUAL
+        product_id = STRIPE_PRODUCT_ANNUAL
         mode = "subscription"
     else:
         return redirect(url_for("pricing"))
@@ -331,6 +342,10 @@ def create_checkout():
             line_items=[{"price": price_id, "quantity": 1}],
             customer_email=email,
             client_reference_id=email,
+            metadata={
+                "plan": plan,
+                "product_id": product_id,
+            },
             success_url=url_for("success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
             cancel_url=url_for("pricing", _external=True),
         )
@@ -1332,20 +1347,19 @@ footer{border-top:1px solid var(--line);margin-top:24px}
     <div class="card">
       <h3>Single Pattern</h3>
       <div class="price">$25</div>
-      <p class="small">Best for one-off projects.</p>
+      <p class="small">Single pattern and legend. Use whenever.</p>
       <ul class="list">
         <li>1 professional pattern conversion</li>
+        <li>Includes grid and legend</li>
         <li>High-resolution output</li>
         <li>Advanced color reduction</li>
-        <li>Customizable grid (10×10 + numbering)</li>
         <li>Multi-format export (PNG, PDF, CSV)</li>
-        <li>Fabric size calculator</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="single">
         <button class="btn" type="submit">Buy single</button>
       </form>
-      <p class="small">One payment, one finished pattern.</p>
+      <p class="small">Best for one-off projects.</p>
     </div>
 
     <!-- 10-Pattern Pack -->
@@ -1356,9 +1370,9 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       <ul class="list">
         <li>10 pattern conversions</li>
         <li>Credits never expire</li>
-        <li>Priority processing over free tier</li>
-        <li>All export formats included</li>
+        <li>Includes all export formats</li>
         <li>Premium palette options</li>
+        <li>All patterns include legend</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="pack10">
@@ -1371,10 +1385,10 @@ footer{border-top:1px solid var(--line);margin-top:24px}
     <div class="card">
       <h3>3-Month Unlimited</h3>
       <div class="price">$75 / month</div>
-      <p class="small">Short-term unlimited access.</p>
+      <p class="small">Unlimited pattern conversions for 3 months.</p>
       <ul class="list">
         <li>Unlimited pattern conversions</li>
-        <li>Higher-resolution output</li>
+        <li>Highest-quality output (4× resolution)</li>
         <li>Advanced color tools</li>
         <li>Priority processing</li>
         <li>All export formats + templates</li>
@@ -1383,20 +1397,21 @@ footer{border-top:1px solid var(--line);margin-top:24px}
         <input type="hidden" name="plan" value="unlimited_3m">
         <button class="btn ghost" type="submit">Start 3-month</button>
       </form>
-      <p class="small">Perfect for focused projects or seasons.</p>
+      <p class="small">Perfect for focused projects or busy seasons.</p>
     </div>
 
     <!-- Annual Pro Unlimited -->
     <div class="card">
       <h3>Pro Annual Unlimited</h3>
       <div class="price">$99 / year</div>
-      <p class="small">Unlimited patterns all year.</p>
+      <p class="small">Unlimited patterns all year. Excellent for pattern sellers.</p>
       <ul class="list">
         <li>Unlimited pattern conversions</li>
-        <li>4× resolution for large projects</li>
+        <li>Highest-quality output (4× resolution)</li>
         <li>Advanced color tools</li>
         <li>Priority processing</li>
         <li>All export formats + templates</li>
+        <li>Early access to new tools</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="unlimited_year">
@@ -1497,4 +1512,3 @@ SUCCESS_HTML = r"""
 
 if __name__ == "__main__":
     app.run(debug=True)
-
