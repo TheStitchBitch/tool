@@ -791,7 +791,7 @@ HOMEPAGE_HTML = r"""
       color:#fff;border:none;cursor:pointer;
       font-size:14px;font-weight:600;letter-spacing:.02em;
       box-shadow:0 7px 18px rgba(248,113,22,.35);
-      transition:transform .08s,box-shadow .08s;
+      transition:transform .08s,box-shadow .08s,background-color .08s;
       display:inline-block;
       text-decoration:none;
       text-align:center;
@@ -804,6 +804,13 @@ HOMEPAGE_HTML = r"""
     }
     .pill-secondary:hover{
       box-shadow:0 4px 14px rgba(148,163,184,.4);
+    }
+    .pill-ready{
+      background:#16a34a;
+      box-shadow:0 7px 18px rgba(22,163,74,.35);
+    }
+    .pill-ready:hover{
+      box-shadow:0 10px 24px rgba(22,163,74,.45);
     }
     .hero-cta-row{
       display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center;
@@ -1026,15 +1033,18 @@ HOMEPAGE_HTML = r"""
   function pickFile(inp){
     const wrapper = inp.closest('label');
     const label = wrapper ? wrapper.querySelector('.file-label-main') : null;
+    const generateBtn = document.getElementById('generateBtn');
 
     if (!inp.files || !inp.files[0]){
       if (wrapper) wrapper.classList.remove('file-ready');
       if (label) label.textContent = 'UPLOAD PICTURE HERE';
+      if (generateBtn) generateBtn.classList.remove('pill-ready');
       return;
     }
 
     if (wrapper) wrapper.classList.add('file-ready');
     if (label) label.textContent = 'IMAGE ATTACHED';
+    if (generateBtn) generateBtn.classList.add('pill-ready');
   }
 
   function setStyleOptions(type){
