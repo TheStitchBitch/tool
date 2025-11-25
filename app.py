@@ -4,7 +4,6 @@ import json
 import math
 import os
 import zipfile
-import base64
 from typing import Dict, Tuple, List, Optional
 
 from flask import (
@@ -21,6 +20,8 @@ from flask import (
 from PIL import Image, ImageDraw, ImageFont
 from werkzeug.security import generate_password_hash, check_password_hash
 
+import stripe
+
 # Optional embroidery support
 try:
     from pyembroidery import EmbPattern, write_dst, write_pes  # type: ignore
@@ -30,6 +31,15 @@ except Exception:
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
+
+# Stripe configuration
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+# Stripe price IDs (from your Stripe export)
+STRIPE_PRICE_SINGLE = "price_1SXC552EltyWEGkhnT1exvQV"      # Single Pattern – $25
+STRIPE_PRICE_PACK10 = "price_1SXCBW2EltyWEGkhcBE1KwPW"      # 10 Pattern Pack – $60
+STRIPE_PRICE_3MO    = "price_1SXCJK2EltyWEGkhWnoupSSf"      # 3 Month Unlimited – $75/month
+STRIPE_PRICE_ANNUAL = "price_1SXCEq2EltyWEGkhoOIFpb1w"      # Pro Annual – $99/year
 
 # Simple JSON “database” for users
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
@@ -142,43 +152,6 @@ def draw_grid(base: Image.Image, cell_px: int) -> Image.Image:
             width=1,
         )
     return out
-
-
-def add_strong_watermark(img: Image.Image) -> Image.Image:
-    """
-    Overlay a dense diagonal watermark so the free preview
-    is not practically usable as a working pattern.
-    Applied only to the on-page preview sample.
-    """
-    wm = img.convert("RGBA")
-    w, h = wm.size
-
-    text_canvas = Image.new("RGBA", (w * 2, h * 2), (0, 0, 0, 0))
-    tdraw = ImageDraw.Draw(text_canvas)
-
-    try:
-        font_size = max(20, min(w, h) // 6)
-        font = ImageFont.truetype("arial.ttf", font_size)
-    except Exception:
-        font = ImageFont.load_default()
-        font_size = 24
-
-    text = "PREVIEW ONLY • PATTERNCRAFT.APP"
-    step_x = font_size * 6
-    step_y = font_size * 3
-
-    for y in range(0, h * 2, step_y):
-        for x in range(0, w * 2, step_x):
-            tdraw.text((x, y), text, font=font, fill=(255, 255, 255, 230))
-
-    rotated = text_canvas.rotate(30, expand=True)
-    rw, rh = rotated.size
-    left = (rw - w) // 2
-    top = (rh - h) // 2
-    crop = rotated.crop((left, top, left + w, top + h))
-
-    result = Image.alpha_composite(wm, crop)
-    return result.convert("RGB")
 
 
 def assign_symbols(colors: List[Tuple[int, int, int]]) -> Dict[Tuple[int, int, int], str]:
@@ -307,7 +280,7 @@ def on_error(_e):
 @app.get("/")
 def index() -> str:
     user = get_current_user()
-    return render_template_string(HOMEPAGE_HTML, user=user, sample_preview=None, sample_error=None)
+    return render_template_string(HOMEPAGE_HTML, user=user)
 
 
 @app.get("/pricing")
@@ -317,7 +290,60 @@ def pricing() -> str:
     message = ""
     if reason == "used_free":
         message = "You’ve already used your PatternCraft.app pattern for this account. Choose a plan to keep generating patterns."
+    elif reason == "no_credits":
+        message = "You’ve used all credits on this account. Pick a pack or unlimited plan to continue."
+    elif reason == "checkout_error":
+        message = "We couldn’t start checkout. Please try again or contact support."
     return render_template_string(PRICING_HTML, user=user, message=message)
+
+
+# ---------------------- CHECKOUT + SUCCESS ----------------------
+@app.post("/checkout")
+def create_checkout():
+    """
+    Create a Stripe Checkout Session for the selected plan.
+    Requires the user to be logged in so we can tie the purchase to their account.
+    """
+    email = session.get("user_email")
+    if not email:
+        return redirect(url_for("login", msg="Log in or create an account before purchasing a plan."))
+
+    plan = (request.form.get("plan") or "").strip()
+
+    if plan == "single":
+        price_id = STRIPE_PRICE_SINGLE
+        mode = "payment"
+    elif plan == "pack10":
+        price_id = STRIPE_PRICE_PACK10
+        mode = "payment"
+    elif plan == "unlimited_3m":
+        price_id = STRIPE_PRICE_3MO
+        mode = "subscription"
+    elif plan == "unlimited_year":
+        price_id = STRIPE_PRICE_ANNUAL
+        mode = "subscription"
+    else:
+        return redirect(url_for("pricing"))
+
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            mode=mode,
+            line_items=[{"price": price_id, "quantity": 1}],
+            customer_email=email,
+            client_reference_id=email,
+            success_url=url_for("success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=url_for("pricing", _external=True),
+        )
+    except Exception:
+        return redirect(url_for("pricing", reason="checkout_error"))
+
+    return redirect(checkout_session.url)
+
+
+@app.get("/success")
+def success():
+    user = get_current_user()
+    return render_template_string(SUCCESS_HTML, user=user)
 
 
 # ---------------------- SIGNUP / LOGIN ----------------------
@@ -359,18 +385,28 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "free",
+        "subscription": "free",  # free, single, pack10, unlimited_3m, unlimited_year
         "free_used": False,
+        "credits": 0,            # used for credit-based plans
     }
     save_users(users)
     session["user_email"] = email
+    session["login_failures"] = 0
     return redirect(url_for("index"))
 
 
 @app.get("/login")
 def login() -> str:
     user = get_current_user()
-    return render_template_string(LOGIN_HTML, user=user, message="")
+    msg = request.args.get("msg", "")
+    failures = int(session.get("login_failures", 0) or 0)
+    attempts_left = max(0, 3 - failures)
+    return render_template_string(
+        LOGIN_HTML,
+        user=user,
+        message=msg,
+        attempts_left=attempts_left,
+    )
 
 
 @app.post("/login")
@@ -379,86 +415,52 @@ def login_post():
     email = (request.form.get("email") or "").strip().lower()
     password = request.form.get("password") or ""
 
+    failures = int(session.get("login_failures", 0) or 0)
+
     if not email or not password:
+        attempts_left = max(0, 3 - failures)
         return render_template_string(
             LOGIN_HTML,
             user=user,
             message="Please enter both email and password.",
+            attempts_left=attempts_left,
         )
 
     users = load_users()
     stored = users.get(email)
     if not stored or not check_password_hash(stored.get("password_hash", ""), password):
+        failures += 1
+        session["login_failures"] = failures
+        if failures >= 3:
+            session["login_failures"] = 0
+            return redirect(
+                url_for(
+                    "signup",
+                    msg="We couldn’t match that email and password after several attempts. Create a PatternCraft.app account to get started.",
+                )
+            )
+        attempts_left = max(0, 3 - failures)
         return render_template_string(
             LOGIN_HTML,
             user=user,
             message="Incorrect email or password.",
+            attempts_left=attempts_left,
         )
 
+    # success
     session["user_email"] = email
+    session["login_failures"] = 0
     return redirect(url_for("index"))
 
 
 @app.get("/logout")
 def logout():
     session.pop("user_email", None)
+    session["login_failures"] = 0
     return redirect(url_for("index"))
 
 
-# ---------------------- SAMPLE PREVIEW (FREE, ON-PAGE, WATERMARKED) ----------------------
-@app.post("/sample-preview")
-def sample_preview():
-    """Allow anyone to upload a sample image and see a watermarked preview grid inline on the homepage."""
-    user = get_current_user()
-    file = request.files.get("sample_file")
-    if not file:
-        return render_template_string(
-            HOMEPAGE_HTML,
-            user=user,
-            sample_preview=None,
-            sample_error="Please upload an image to preview.",
-        )
-    try:
-        img = open_image(file)
-    except Exception:
-        return render_template_string(
-            HOMEPAGE_HTML,
-            user=user,
-            sample_preview=None,
-            sample_error="Could not read that image. Try a PNG or JPG.",
-        )
-    if max(img.size) > MAX_DIM:
-        return render_template_string(
-            HOMEPAGE_HTML,
-            user=user,
-            sample_preview=None,
-            sample_error=f"Image is too large. Try something under {MAX_DIM}px on a side.",
-        )
-
-    # Lightweight preview defaults
-    stitch_w = 80
-    max_colors = 12
-    small = resize_for_stitch_width(img, stitch_w)
-    quant = quantize(small, max_colors)
-    grid_img = draw_grid(quant, cell_px=10)
-
-    # Apply strong watermark ONLY to this sample preview
-    grid_img = add_strong_watermark(grid_img)
-
-    buf = io.BytesIO()
-    grid_img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    data_url = f"data:image/png;base64,{b64}"
-
-    return render_template_string(
-        HOMEPAGE_HTML,
-        user=user,
-        sample_preview=data_url,
-        sample_error=None,
-    )
-
-
-# ---------------------- FREE SAMPLE QUILT PATTERN ZIP ----------------------
+# ---------------------- SAMPLE PATTERN ZIP ----------------------
 @app.get("/sample-pattern.zip")
 def sample_pattern_zip():
     """
@@ -562,25 +564,33 @@ def sample_pattern_zip():
     )
 
 
-# ---------------------- PATTERN GENERATOR (ACCOUNT-GATED) ----------------------
+# ---------------------- PATTERN GENERATOR (ACCOUNT + MEMBERSHIP GATED) ----------------------
 @app.post("/api/convert")
 def convert():
-    # Require an account
+    # Require an account (login first, then signup after 3 failed attempts)
     email = session.get("user_email")
     if not email:
-        return redirect(url_for("signup", msg="Create your PatternCraft.app account to generate patterns."))
+        return redirect(url_for("login", msg="Log in to generate patterns."))
 
     users = load_users()
     user = users.get(email)
     if not user:
         session.pop("user_email", None)
-        return redirect(url_for("signup", msg="Please create your PatternCraft.app account to continue."))
+        return redirect(url_for("signup", msg="Create your PatternCraft.app account to continue."))
 
-    subscription = user.get("subscription", "free")
+    subscription = user.get("subscription", "free")  # free, single, pack10, unlimited_3m, unlimited_year
+    credits = int(user.get("credits", 0) or 0)
     mark_free_used = False
+    consume_credit = False
 
-    if subscription in ("pro_monthly", "pro_yearly", "pro_unlimited"):
+    # Membership logic:
+    # - unlimited_3m / unlimited_year: unlimited usage
+    # - if credits > 0: consume 1 credit per convert
+    # - else: free tier, 1 pattern per account
+    if subscription in ("unlimited_3m", "unlimited_year"):
         pass
+    elif credits > 0:
+        consume_credit = True
     else:
         if user.get("free_used"):
             return redirect(url_for("pricing", reason="used_free"))
@@ -701,8 +711,12 @@ def convert():
         else:
             return jsonify({"error": "unknown_ptype"}), 400
 
+    # update membership usage
+    if consume_credit and credits > 0:
+        user["credits"] = max(0, credits - 1)
     if mark_free_used:
         user["free_used"] = True
+    if consume_credit or mark_free_used:
         users[email] = user
         save_users(users)
 
@@ -778,6 +792,9 @@ HOMEPAGE_HTML = r"""
       font-size:14px;font-weight:600;letter-spacing:.02em;
       box-shadow:0 7px 18px rgba(248,113,22,.35);
       transition:transform .08s,box-shadow .08s;
+      display:inline-block;
+      text-decoration:none;
+      text-align:center;
     }
     .pill:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(248,113,22,.45);}
     .pill-secondary{
@@ -797,39 +814,6 @@ HOMEPAGE_HTML = r"""
       font-size:11px;padding:4px 8px;border-radius:999px;
       background:#e5edff;color:#1d4ed8;border:1px solid rgba(129,140,248,.5);
     }
-    .sample-grid{display:grid;gap:14px;grid-template-columns:1.2fr 1.1fr}
-    .sample-card{border-radius:14px;border:1px solid var(--line);padding:10px;background:#fff;box-shadow:0 6px 18px rgba(15,23,42,.08)}
-    .sample-label{font-weight:600;font-size:13px;margin-bottom:6px}
-    .sample-art{border-radius:12px;overflow:hidden;background:#0f172a}
-    .sample-art img{width:100%;display:block;object-fit:cover;max-height:260px}
-    .sample-pattern{
-      border-radius:12px;border:1px solid #e5e7eb;
-      background-image:
-        linear-gradient(to right, rgba(15,23,42,.15) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(15,23,42,.15) 1px, transparent 1px);
-      background-size:12px 12px;
-      height:220px;position:relative;overflow:hidden;
-    }
-    .sample-pattern::before{
-      content:"";
-      position:absolute;inset:18px;
-      border-radius:8px;
-      background:repeating-linear-gradient(
-        45deg,
-        rgba(249,115,22,.15) 0,
-        rgba(249,115,22,.15) 6px,
-        transparent 6px,
-        transparent 12px
-      );
-      mix-blend-mode:multiply;
-    }
-    .sample-pattern::after{
-      content:"✦ ○ ◆";
-      position:absolute;inset:0;
-      display:flex;align-items:center;justify-content:center;
-      font-size:24px;font-weight:700;color:rgba(15,23,42,.45);
-    }
-    .sample-note{font-size:12px;color:var(--muted);margin-top:6px}
     .section-title{font-size:1.1rem;margin-bottom:6px}
     .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.2fr)}
     .file{
@@ -845,6 +829,11 @@ HOMEPAGE_HTML = r"""
       background:#dbe4ff;border-color:#365ed1;
       transform:translateY(-1px);
       box-shadow:0 6px 15px rgba(37,99,235,.3);
+    }
+    .file-ready{
+      background:#dcfce7;
+      border-color:#16a34a;
+      box-shadow:0 6px 15px rgba(22,163,74,.35);
     }
     .file input{display:none}
     .file-label-main{font-weight:800;font-size:15px;text-transform:uppercase;letter-spacing:.06em}
@@ -868,13 +857,8 @@ HOMEPAGE_HTML = r"""
     label{font-size:13px}
     .controls-note{font-size:11px;color:#94a3b8;margin-top:4px}
     .hidden{display:none}
-    .error-banner{
-      margin-top:8px;font-size:12px;color:#b91c1c;background:#fee2e2;
-      border-radius:8px;padding:6px 8px;
-    }
     @media (max-width:860px){
       .hero{grid-template-columns:1fr}
-      .sample-grid{grid-template-columns:1fr}
       .make-layout{grid-template-columns:1fr}
     }
   </style>
@@ -907,17 +891,23 @@ HOMEPAGE_HTML = r"""
         and embroidery-ready files with one upload. Export a full ZIP you can print or take to your machine.
       </p>
       <div class="hero-cta-row">
-        <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
-          See the tool
-        </button>
-        <button class="pill pill-secondary" onclick="location.href='#how'">
+        {% if user %}
+          <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
+            Open the tool
+          </button>
+        {% else %}
+          <a class="pill" href="/login?msg=Log+in+to+open+the+PatternCraft+tool.">
+            Open the tool
+          </a>
+        {% endif %}
+        <a class="pill pill-secondary" href="/pricing#how">
           See how it works
-        </button>
+        </a>
       </div>
       <div class="hero-note">
-        Step 1: <a href="#how">Preview a finished pattern</a> ·
-        Step 2: <a href="/signup">Create your PatternCraft.app account</a> ·
-        Step 3: Upload your art and generate your own pattern.
+        Step 1: <a href="/pricing#how">See how PatternCraft.app works</a> ·
+        Step 2: <a href="/signup">Create your account</a> ·
+        Step 3: Upload art and generate your pattern ZIP.
       </div>
       <div class="badge-row">
         <span class="badge">One pattern included with every account</span>
@@ -933,54 +923,6 @@ HOMEPAGE_HTML = r"""
         <li>Knitting charts that respect row proportions</li>
         <li>Embroidery outputs ready for your workflow</li>
       </ul>
-    </div>
-  </div>
-
-  <div id="how" class="card" style="margin-bottom:24px">
-    <h2 class="section-title">See a PatternCraft.app conversion</h2>
-    <div class="sample-grid">
-
-      <div class="sample-card">
-        <div class="sample-label">Artwork in</div>
-        <form method="POST" action="/sample-preview" enctype="multipart/form-data">
-          <label class="file">
-            <input type="file" name="sample_file" accept="image/*" required>
-            <div>
-              <div class="file-label-main">TRY A FREE PREVIEW</div>
-              <div class="file-label-sub">
-                Upload a sample image — we’ll convert it and show the pattern on the right.
-              </div>
-            </div>
-          </label>
-          <button class="pill pill-secondary" type="submit" style="margin-top:8px;">
-            See pattern preview
-          </button>
-        </form>
-        {% if sample_error %}
-          <div class="error-banner" style="margin-top:8px;">{{ sample_error }}</div>
-        {% endif %}
-        <div class="sample-note" style="margin-top:8px;">
-          This on-page preview is for demonstration only. Your full, clean pattern comes from the ZIP you generate below.
-        </div>
-      </div>
-
-      <div class="sample-card">
-        <div class="sample-label">Pattern out (preview)</div>
-        {% if sample_preview %}
-          <div class="sample-art">
-            <img src="{{ sample_preview }}" alt="PatternCraft.app sample pattern preview">
-          </div>
-          <div class="sample-note">
-            This watermarked grid is a live rendering of your upload. Exports from your account are clean and ready to stitch.
-          </div>
-        {% else %}
-          <div class="sample-pattern"></div>
-          <div class="sample-note">
-            Once you upload art on the left, we’ll show the stitched grid here.
-          </div>
-        {% endif %}
-      </div>
-
     </div>
   </div>
 
@@ -1069,7 +1011,7 @@ HOMEPAGE_HTML = r"""
           </fieldset>
 
           <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <button class="pill" type="submit">Generate pattern ZIP</button>
+            <button class="pill" id="generateBtn" type="submit">Generate pattern ZIP</button>
             <span class="muted">
               Your download includes grid.png, legend.csv, meta.json, and optional pattern.pdf or embroidery files.
             </span>
@@ -1084,8 +1026,15 @@ HOMEPAGE_HTML = r"""
   function pickFile(inp){
     const wrapper = inp.closest('label');
     const label = wrapper ? wrapper.querySelector('.file-label-main') : null;
-    if (!inp.files || !inp.files[0] || !label) return;
-    label.textContent = 'Selected: ' + inp.files[0].name;
+
+    if (!inp.files || !inp.files[0]){
+      if (wrapper) wrapper.classList.remove('file-ready');
+      if (label) label.textContent = 'UPLOAD PICTURE HERE';
+      return;
+    }
+
+    if (wrapper) wrapper.classList.add('file-ready');
+    if (label) label.textContent = 'IMAGE ATTACHED';
   }
 
   function setStyleOptions(type){
@@ -1140,7 +1089,7 @@ HOMEPAGE_HTML = r"""
 </html>
 """
 
-# ---------------------- INLINE HTML: SIGNUP / LOGIN / PRICING ----------------------
+# ---------------------- INLINE HTML: SIGNUP / LOGIN / PRICING / SUCCESS ----------------------
 SIGNUP_HTML = r"""
 <!doctype html>
 <html lang="en">
@@ -1263,6 +1212,15 @@ LOGIN_HTML = r"""
     {% if message %}
       <div class="msg">{{ message }}</div>
     {% endif %}
+    {% if attempts_left is not none %}
+      <p class="muted" style="margin-top:6px;">
+        {% if attempts_left > 0 %}
+          You have {{ attempts_left }} more attempt{{ 's' if attempts_left != 1 else '' }} before we suggest creating a new account.
+        {% else %}
+          If you’re having trouble logging in, you can create a new account with your email.
+        {% endif %}
+      </p>
+    {% endif %}
     <p class="muted" style="margin-top:10px;">
       New to PatternCraft.app? <a href="/signup">Create an account</a>.
     </p>
@@ -1272,7 +1230,7 @@ LOGIN_HTML = r"""
 </html>
 """
 
-PRICING_HTML = """
+PRICING_HTML = r"""
 <!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PatternCraft • Pricing</title>
@@ -1314,7 +1272,6 @@ header{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line)
 footer{border-top:1px solid var(--line);margin-top:24px}
 @media (max-width:700px){ .cards{grid-template-columns:1fr} }
 
-/* how-it-works visual */
 .steps{
   display:grid;
   grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
@@ -1374,7 +1331,10 @@ footer{border-top:1px solid var(--line);margin-top:24px}
         <li>Multi-format export (PNG, PDF, CSV)</li>
         <li>Fabric size calculator</li>
       </ul>
-      <button class="btn" type="button">Buy single (coming soon)</button>
+      <form method="POST" action="/checkout">
+        <input type="hidden" name="plan" value="single">
+        <button class="btn" type="submit">Buy single</button>
+      </form>
       <p class="small">One payment, one finished pattern.</p>
     </div>
 
@@ -1390,14 +1350,17 @@ footer{border-top:1px solid var(--line);margin-top:24px}
         <li>All export formats included</li>
         <li>Premium palette options</li>
       </ul>
-      <button class="btn ghost" type="button">Buy 10-pack (coming soon)</button>
+      <form method="POST" action="/checkout">
+        <input type="hidden" name="plan" value="pack10">
+        <button class="btn ghost" type="submit">Buy 10-pack</button>
+      </form>
       <p class="small">Save big vs buying singles.</p>
     </div>
 
     <!-- 3-Month Unlimited -->
     <div class="card">
       <h3>3-Month Unlimited</h3>
-      <div class="price">$75 / 3 months</div>
+      <div class="price">$75 / month</div>
       <p class="small">Short-term unlimited access.</p>
       <ul class="list">
         <li>Unlimited pattern conversions</li>
@@ -1406,7 +1369,10 @@ footer{border-top:1px solid var(--line);margin-top:24px}
         <li>Priority processing</li>
         <li>All export formats + templates</li>
       </ul>
-      <button class="btn ghost" type="button">Start 3-month (coming soon)</button>
+      <form method="POST" action="/checkout">
+        <input type="hidden" name="plan" value="unlimited_3m">
+        <button class="btn ghost" type="submit">Start 3-month</button>
+      </form>
       <p class="small">Perfect for focused projects or seasons.</p>
     </div>
 
@@ -1422,13 +1388,16 @@ footer{border-top:1px solid var(--line);margin-top:24px}
         <li>Priority processing</li>
         <li>All export formats + templates</li>
       </ul>
-      <button class="btn ghost" type="button">Go Pro annual (coming soon)</button>
+      <form method="POST" action="/checkout">
+        <input type="hidden" name="plan" value="unlimited_year">
+        <button class="btn ghost" type="submit">Go Pro annual</button>
+      </form>
       <p class="small">Best value if you stitch more than 4 patterns a year.</p>
     </div>
   </div>
 </section>
 
-<section class="wrap">
+<section class="wrap" id="how">
   <h2>How PatternCraft.app works</h2>
   <p class="small">From photo to stitch-ready pattern in three simple steps.</p>
   <div class="steps">
@@ -1465,7 +1434,56 @@ footer{border-top:1px solid var(--line);margin-top:24px}
 </footer>
 """
 
-# (no explicit __main__ block needed on Render; you can add one for local dev if you like)
-# if __name__ == "__main__":
-#     app.run(debug=True)
+SUCCESS_HTML = r"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Payment successful — PatternCraft.app</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{
+      margin:0;
+      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;
+      background:#F7F4EF;
+      color:#111827;
+    }
+    .wrap{
+      max-width:520px;
+      margin:0 auto;
+      padding:32px 16px 40px;
+    }
+    .card{
+      background:#fff;
+      border-radius:14px;
+      border:1px solid #e5e7eb;
+      padding:24px;
+      box-shadow:0 10px 30px rgba(15,23,42,.15);
+    }
+    h1{margin:0 0 10px;font-size:1.7rem}
+    p{margin:6px 0;font-size:14px;color:#4b5563}
+    a{
+      color:#2563eb;
+      text-decoration:none;
+      font-weight:600;
+    }
+    a:hover{text-decoration:underline;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Payment received</h1>
+      <p>Thank you{% if user %}, {{ user.email }}{% endif %}. Your PatternCraft.app plan will be updated shortly.</p>
+      <p>You can go back to the tool and start generating patterns right away. If your account hasn’t updated yet, it will as soon as Stripe finishes processing your purchase and you update your membership settings.</p>
+      <p style="margin-top:14px;">
+        <a href="/">← Back to PatternCraft.app</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>
+"""
 
+if __name__ == "__main__":
+    app.run(debug=True)
