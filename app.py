@@ -137,7 +137,7 @@ def draw_grid(base: Image.Image, cell_px: int) -> Image.Image:
         )
     for y in range(sy + 1):
         draw.line(
-            [(0, y * cell_px), (sx * cell_px, y * cell_px)],
+            [(0, y * cell_px), (sx * cell_px, sy * cell_px)],
             fill=(bold if y % 10 == 0 else thin),
             width=1,
         )
@@ -217,7 +217,7 @@ def draw_symbols_on_grid(
         )
     for y in range(sy + 1):
         draw.line(
-            [(0, y * cell_px), (sx * cell_px, y * cell_px)],
+            [(0, y * cell_px), (sx * cell_px, sy * cell_px)],
             fill=(bold if y % 10 == 0 else thin),
             width=1,
         )
@@ -458,7 +458,7 @@ def sample_preview():
     )
 
 
-# ---------------------- FREE SAMPLE QUILT PATTERN ZIP (ROUTE STILL AVAILABLE) ----------------------
+# ---------------------- FREE SAMPLE QUILT PATTERN ZIP ----------------------
 @app.get("/sample-pattern.zip")
 def sample_pattern_zip():
     """
@@ -562,7 +562,7 @@ def sample_pattern_zip():
     )
 
 
-# ---------------------- PATTERN GENERATOR (ACCOUNT-GATED, CLEAN OUTPUT) ----------------------
+# ---------------------- PATTERN GENERATOR (ACCOUNT-GATED) ----------------------
 @app.post("/api/convert")
 def convert():
     # Require an account
@@ -885,11 +885,12 @@ HOMEPAGE_HTML = r"""
   <div class="topbar">
     <div class="brand">PatternCraft.app</div>
     <div class="top-links">
+      <a href="/pricing">Pricing</a>
       {% if user %}
-        Signed in as {{ user.email }} ({{ user.subscription }} plan)
+        · Signed in as {{ user.email }} ({{ user.subscription }} plan)
         · <a href="/logout">Sign out</a>
       {% else %}
-        <a href="/login">Log in</a> · <a href="/signup">Create account</a>
+        · <a href="/login">Log in</a> · <a href="/signup">Create account</a>
       {% endif %}
     </div>
   </div>
@@ -1271,77 +1272,200 @@ LOGIN_HTML = r"""
 </html>
 """
 
-PRICING_HTML = r"""
+PRICING_HTML = """
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>PatternCraft.app — Pricing</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    body{margin:0;background:#F7F4EF;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter}
-    .wrap{max-width:780px;margin:0 auto;padding:32px 16px}
-    h1{margin-top:0}
-    .plans{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
-    .card{background:#fff;border-radius:14px;border:1px solid #e8e4de;padding:18px;box-shadow:0 6px 20px rgba(0,0,0,.06)}
-    .price{font-size:1.6rem;font-weight:600}
-    .muted{color:#6b6b6b;font-size:13px}
-    .btn{display:inline-block;margin-top:10px;padding:8px 14px;border-radius:999px;
-         background:#222;color:#fff;text-decoration:none;font-size:14px}
-    .msg{margin-bottom:12px;font-size:13px;color:#b91c1c}
-  </style>
-</head>
-<body>
-<div class="wrap">
-  <h1>PatternCraft.app pricing</h1>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PatternCraft • Pricing</title>
+<style>
+:root{
+  --fg:#111; --muted:#666; --accent:#e4006d; --line:#eee; --card:#fafafa;
+  --radius:14px; --wrap:1100px;
+}
+*{box-sizing:border-box} html,body{margin:0;padding:0}
+body{
+  font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  color:var(--fg);background:#fff;
+}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:20px}
+header{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);z-index:5}
+.brand{font-weight:800;letter-spacing:.2px}
+.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.btn{
+  display:inline-block;padding:10px 16px;border-radius:999px;
+  border:1px solid var(--accent);background:var(--accent);color:#fff;
+  text-decoration:none;font-weight:700;cursor:pointer
+}
+.btn.ghost{background:transparent;color:var(--accent)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+.card h3{margin:0 0 6px}
+.price{font-size:28px;font-weight:800;margin:4px 0}
+.small{font-size:14px;color:var(--muted)}
+.list{margin:8px 0 12px;padding-left:20px}
+.badge{
+  display:inline-block;background:#ffe6f3;color:#bb0055;border-radius:999px;
+  padding:4px 12px;font-size:13px;font-weight:600;margin-bottom:6px
+}
+.notice{
+  margin-top:10px;padding:10px 12px;border-radius:10px;
+  background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
+  font-size:14px;
+}
+footer{border-top:1px solid var(--line);margin-top:24px}
+@media (max-width:700px){ .cards{grid-template-columns:1fr} }
+
+/* how-it-works visual */
+.steps{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:16px;
+  margin-top:16px;
+}
+.step-card{
+  background:var(--card);
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  padding:16px;
+}
+.step-num{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:26px;height:26px;
+  border-radius:999px;
+  background:var(--accent);
+  color:#fff;
+  font-size:14px;
+  font-weight:700;
+  margin-bottom:8px;
+}
+</style>
+
+<header>
+  <div class="wrap row" style="justify-content:space-between">
+    <div class="brand">PatternCraft.app</div>
+    <nav class="row">
+      <a class="btn ghost" href="/">Tool</a>
+      <a class="btn" href="/pricing">Pricing</a>
+    </nav>
+  </div>
+</header>
+
+<section class="wrap">
+  <div class="badge">Simple, transparent pricing</div>
+  <h1>Choose the plan that fits your stitching</h1>
+  <p class="small">Start with a single pattern, save with a pack, or go unlimited.</p>
+
   {% if message %}
-    <div class="msg">{{ message }}</div>
+  <div class="notice">{{ message }}</div>
   {% endif %}
-  <p class="muted">Start with your included pattern, then choose a plan if PatternCraft.app becomes part of your workflow.</p>
-  <div class="plans">
+
+  <div class="cards">
+    <!-- Single Pattern -->
     <div class="card">
-      <div class="price">Included with every account</div>
-      <ul class="muted">
-        <li>1 PatternCraft.app pattern conversion</li>
-        <li>All stitch types included</li>
-        <li>Annual newsletter with pattern ideas</li>
+      <h3>Single Pattern</h3>
+      <div class="price">$25</div>
+      <p class="small">Best for one-off projects.</p>
+      <ul class="list">
+        <li>1 professional pattern conversion</li>
+        <li>High-resolution output</li>
+        <li>Advanced color reduction</li>
+        <li>Customizable grid (10×10 + numbering)</li>
+        <li>Multi-format export (PNG, PDF, CSV)</li>
+        <li>Fabric size calculator</li>
       </ul>
-      <a href="/signup" class="btn">Create account</a>
+      <button class="btn" type="button">Buy single (coming soon)</button>
+      <p class="small">One payment, one finished pattern.</p>
     </div>
+
+    <!-- 10-Pattern Pack -->
     <div class="card">
-      <div class="price">$5 / 10 patterns</div>
-      <ul class="muted">
-        <li>Pay once, use whenever</li>
-        <li>Great for small projects</li>
-        <li>Credits model (implementation coming soon)</li>
+      <h3>10-Pattern Pack</h3>
+      <div class="price">$60</div>
+      <p class="small">Great for consistent hobby use.</p>
+      <ul class="list">
+        <li>10 pattern conversions</li>
+        <li>Credits never expire</li>
+        <li>Priority processing over free tier</li>
+        <li>All export formats included</li>
+        <li>Premium palette options</li>
       </ul>
-      <a href="/signup" class="btn">Join waitlist</a>
+      <button class="btn ghost" type="button">Buy 10-pack (coming soon)</button>
+      <p class="small">Save big vs buying singles.</p>
     </div>
+
+    <!-- 3-Month Unlimited -->
     <div class="card">
-      <div class="price">$20 / month</div>
-      <ul class="muted">
-        <li>Unlimited conversions</li>
+      <h3>3-Month Unlimited</h3>
+      <div class="price">$75 / 3 months</div>
+      <p class="small">Short-term unlimited access.</p>
+      <ul class="list">
+        <li>Unlimited pattern conversions</li>
+        <li>Higher-resolution output</li>
+        <li>Advanced color tools</li>
         <li>Priority processing</li>
-        <li>Ideal for shops & power users</li>
+        <li>All export formats + templates</li>
       </ul>
-      <a href="/signup" class="btn">Join waitlist</a>
+      <button class="btn ghost" type="button">Start 3-month (coming soon)</button>
+      <p class="small">Perfect for focused projects or seasons.</p>
     </div>
+
+    <!-- Annual Pro Unlimited -->
     <div class="card">
-      <div class="price">$100 / year</div>
-      <ul class="muted">
-        <li>Unlimited patterns all year</li>
-        <li>Best value for frequent makers</li>
-        <li>No monthly billing</li>
+      <h3>Pro Annual Unlimited</h3>
+      <div class="price">$99 / year</div>
+      <p class="small">Unlimited patterns all year.</p>
+      <ul class="list">
+        <li>Unlimited pattern conversions</li>
+        <li>4× resolution for large projects</li>
+        <li>Advanced color tools</li>
+        <li>Priority processing</li>
+        <li>All export formats + templates</li>
       </ul>
-      <a href="/signup" class="btn">Join waitlist</a>
+      <button class="btn ghost" type="button">Go Pro annual (coming soon)</button>
+      <p class="small">Best value if you stitch more than 4 patterns a year.</p>
     </div>
   </div>
-</div>
-</body>
-</html>
+</section>
+
+<section class="wrap">
+  <h2>How PatternCraft.app works</h2>
+  <p class="small">From photo to stitch-ready pattern in three simple steps.</p>
+  <div class="steps">
+    <div class="step-card">
+      <div class="step-num">1</div>
+      <h3>Upload your image</h3>
+      <p class="small">
+        Start with a photo, artwork, or logo. PatternCraft analyzes it for stitchable detail.
+      </p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">2</div>
+      <h3>Choose size & colors</h3>
+      <p class="small">
+        Set stitch width, cloth count, and palette size. Preview your grid with bold 10×10 guides.
+      </p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">3</div>
+      <h3>Download your pattern ZIP</h3>
+      <p class="small">
+        Download a ZIP with grid.png, legend.csv, meta.json, and optional PDF or embroidery files,
+        ready to print or import into your workflow.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer class="wrap small">
+  <div class="row" style="justify-content:space-between">
+    <div>© PatternCraft.app</div>
+    <div><a href="/" class="btn ghost">Back to tool</a></div>
+  </div>
+</footer>
 """
 
-if __name__ == "__main__":
-    # Local dev; on Render use: gunicorn app:app --bind 0.0.0.0:$PORT
-    app.run(host="127.0.0.1", port=5050, debug=True)
+# (no explicit __main__ block needed on Render; you can add one for local dev if you like)
+# if __name__ == "__main__":
+#     app.run(debug=True)
 
