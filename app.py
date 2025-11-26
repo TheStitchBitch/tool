@@ -5,7 +5,7 @@ import json
 import math
 import os
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, Tuple, List, Optional
 
 from flask import (
@@ -32,28 +32,17 @@ try:
 except Exception:
     HAS_PYEMB = False
 
-# --------------------------------------------------------------------------------------
-# Flask + Stripe configuration
-# --------------------------------------------------------------------------------------
-
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-# Stripe secret key from Render env (STRIPE_SECRET_KEY)
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+# Stripe configuration
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
-# Base URL for redirect/callbacks
-BASE_URL = os.environ.get("BASE_URL", "https://patterncraft.app").rstrip("/")
-
-# Optional marketing walkthrough video (Google Drive or static file)
-# If WALKTHROUGH_URL is set, that wins; otherwise we point at /static/walkthrough.mp4
-WALKTHROUGH_URL = os.environ.get("WALKTHROUGH_URL", "/static/walkthrough.mp4")
-
-# Stripe live price IDs (from your latest CSV)
-STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"  # 3 Month Unlimited – $75 every 3 months (subscription)
-STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"  # Single Pattern – $25
-STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"  # 10 Pattern Pack – $60
-STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"  # Pro Annual – $99/year
+# Stripe price IDs (LIVE – from your latest CSV)
+STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"      # Single Pattern – $25
+STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"      # 10 Pattern Pack – $60
+STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"         # 3-Month Unlimited – $75 every 3 months
+STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"      # Pro Annual – $99/year
 
 # Simple JSON “database” for users
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
@@ -66,9 +55,7 @@ CELL_PX = 12
 MAX_DIM = 8000  # max width/height in pixels
 
 
-# --------------------------------------------------------------------------------------
-# User storage + membership helpers
-# --------------------------------------------------------------------------------------
+# ---------------------- USER STORAGE / MEMBERSHIP ----------------------
 
 
 def load_users() -> Dict[str, dict]:
@@ -99,97 +86,22 @@ def get_current_user() -> Optional[dict]:
     return users.get(email)
 
 
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def parse_iso(ts: Optional[str]) -> Optional[datetime]:
-    if not ts:
-        return None
-    try:
-        dt = datetime.fromisoformat(ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def has_unlimited_access(user: dict) -> bool:
+def is_membership_active(user: dict) -> bool:
+    """Unlimited access for 3‑month or annual plans until membership_expires."""
     sub = user.get("subscription")
     if sub not in ("unlimited_3m", "unlimited_year"):
         return False
-    exp = parse_iso(user.get("subscription_expires"))
-    if not exp:
-        return True
-    return exp > utcnow()
+    exp_str = user.get("membership_expires")
+    if not exp_str:
+        return False
+    try:
+        exp = datetime.fromisoformat(exp_str)
+    except Exception:
+        return False
+    return datetime.utcnow() < exp
 
 
-def describe_plan(user: Optional[dict]) -> str:
-    if not user:
-        return "Guest"
-    credits = int(user.get("credits", 0) or 0)
-    sub = user.get("subscription", "free")
-    free_used = bool(user.get("free_used"))
-
-    if has_unlimited_access(user):
-        if sub == "unlimited_year":
-            return "Pro Annual (unlimited)"
-        if sub == "unlimited_3m":
-            return "3‑Month Unlimited (active)"
-        return "Unlimited (active)"
-
-    if credits > 0:
-        return f"{credits} pattern credit{'s' if credits != 1 else ''}"
-
-    if not free_used:
-        return "Free trial (1 pattern)"
-
-    return "Free account (trial used)"
-
-
-def apply_purchase_to_user(email: str, price_id: str, checkout_session_id: str) -> None:
-    email = (email or "").strip().lower()
-    if not email or not price_id:
-        return
-
-    users = load_users()
-    user = users.get(email)
-    if not user:
-        return
-
-    processed: List[str] = list(user.get("processed_sessions", []))
-    if checkout_session_id and checkout_session_id in processed:
-        # Already applied this purchase
-        return
-
-    now = utcnow()
-    credits = int(user.get("credits", 0) or 0)
-
-    if price_id == STRIPE_PRICE_SINGLE:
-        credits += 1
-        user["credits"] = credits
-    elif price_id == STRIPE_PRICE_PACK10:
-        credits += 10
-        user["credits"] = credits
-    elif price_id == STRIPE_PRICE_3MO:
-        user["subscription"] = "unlimited_3m"
-        # Approximate 3 months as 90 days from purchase
-        user["subscription_expires"] = (now + timedelta(days=90)).isoformat()
-    elif price_id == STRIPE_PRICE_ANNUAL:
-        user["subscription"] = "unlimited_year"
-        user["subscription_expires"] = (now + timedelta(days=365)).isoformat()
-
-    processed.append(checkout_session_id)
-    user["processed_sessions"] = processed[-20:]
-
-    users[email] = user
-    save_users(users)
-
-
-# --------------------------------------------------------------------------------------
-# Image / pattern helpers
-# --------------------------------------------------------------------------------------
+# ---------------------- IMAGE / PATTERN HELPERS ----------------------
 
 
 def clamp(v: int, lo: int, hi: int) -> int:
@@ -373,9 +285,7 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# --------------------------------------------------------------------------------------
-# Basic routes + error handlers
-# --------------------------------------------------------------------------------------
+# ---------------------- BASIC ROUTES / ERRORS ----------------------
 
 
 @app.get("/health")
@@ -389,30 +299,18 @@ def too_large(_e):
 
 
 @app.errorhandler(Exception)
-def on_error(_e):
+def on_error(e):
+    app.logger.exception("Unhandled error: %s", e)
     return make_response(jsonify({"error": "server_error"}), 500)
 
 
-# --------------------------------------------------------------------------------------
-# Homepage
-# --------------------------------------------------------------------------------------
+# ---------------------- HOME / PRICING ----------------------
 
 
 @app.get("/")
 def index() -> str:
     user = get_current_user()
-    plan_label = describe_plan(user)
-    return render_template_string(
-        HOMEPAGE_HTML,
-        user=user,
-        plan_label=plan_label,
-        walkthrough_url=WALKTHROUGH_URL,
-    )
-
-
-# --------------------------------------------------------------------------------------
-# Pricing + checkout
-# --------------------------------------------------------------------------------------
+    return render_template_string(HOMEPAGE_HTML, user=user)
 
 
 @app.get("/pricing")
@@ -422,24 +320,32 @@ def pricing() -> str:
     message = ""
     if reason == "used_free":
         message = (
-            "You’ve already used your included PatternCraft.app pattern on this account. "
-            "Choose a plan to keep generating patterns."
+            "You’ve already used your included PatternCraft.app pattern for this account. "
+            "Pick a plan to keep generating patterns."
         )
     elif reason == "no_credits":
-        message = "You’ve used all pattern credits on this account. Pick a pack or unlimited plan to continue."
+        message = "You’ve used all available credits on this account. Choose a pack or unlimited plan to continue."
     elif reason == "checkout_error":
         message = "We couldn’t start checkout. Please try again or contact support."
-
     return render_template_string(PRICING_HTML, user=user, message=message)
+
+
+# ---------------------- CHECKOUT + SUCCESS ----------------------
 
 
 @app.post("/checkout")
 def create_checkout():
-    """Create a Stripe Checkout Session for the selected plan."""
+    """
+    Create a Stripe Checkout Session for the selected plan.
+    Single, Pack10: one-time payments; 3-Month + Annual: subscriptions.
+    """
     email = session.get("user_email")
     if not email:
         return redirect(
-            url_for("login", msg="Log in or create an account before purchasing a plan.")
+            url_for(
+                "login",
+                msg="Log in or create an account before purchasing a plan.",
+            )
         )
 
     plan = (request.form.get("plan") or "").strip()
@@ -452,15 +358,12 @@ def create_checkout():
         mode = "payment"
     elif plan == "unlimited_3m":
         price_id = STRIPE_PRICE_3MO
-        mode = "subscription"
+        mode = "subscription"  # 3‑month recurring subscription
     elif plan == "unlimited_year":
         price_id = STRIPE_PRICE_ANNUAL
         mode = "subscription"
     else:
         return redirect(url_for("pricing"))
-
-    if not stripe.api_key:
-        return redirect(url_for("pricing", reason="checkout_error"))
 
     try:
         checkout_session = stripe.checkout.Session.create(
@@ -468,10 +371,11 @@ def create_checkout():
             line_items=[{"price": price_id, "quantity": 1}],
             customer_email=email,
             client_reference_id=email,
-            success_url=f"{BASE_URL}{url_for('success')}?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{BASE_URL}{url_for('pricing')}",
+            success_url=url_for("success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=url_for("pricing", _external=True),
         )
-    except Exception:
+    except Exception as e:
+        app.logger.exception("Stripe checkout error: %s", e)
         return redirect(url_for("pricing", reason="checkout_error"))
 
     return redirect(checkout_session.url)
@@ -479,32 +383,84 @@ def create_checkout():
 
 @app.get("/success")
 def success():
-    """Stripe Checkout success landing page."""
+    """
+    After Stripe Checkout, use the session_id to look up which price was purchased
+    and update the user’s membership/credits accordingly.
+    """
     user = get_current_user()
-    session_id = request.args.get("session_id", "").strip()
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return render_template_string(SUCCESS_HTML, user=user, message="Payment received.")
 
-    if session_id:
-        try:
-            cs = stripe.checkout.Session.retrieve(session_id, expand=["line_items"])
-            line_items = cs["line_items"]["data"] if cs.get("line_items") else []
-            price_id = ""
-            if line_items:
-                price_id = line_items[0]["price"]["id"]
-            purchaser_email = cs.get("customer_email") or cs.get("client_reference_id") or (
-                user.get("email") if user else ""
-            )
-            if purchaser_email and price_id:
-                apply_purchase_to_user(purchaser_email, price_id, session_id)
-        except Exception:
-            pass
+    try:
+        sess = stripe.checkout.Session.retrieve(
+            session_id,
+            expand=["line_items"],
+        )
+    except Exception as e:
+        app.logger.exception("Stripe session retrieve error: %s", e)
+        return render_template_string(
+            SUCCESS_HTML,
+            user=user,
+            message="Payment received, but we couldn’t confirm the details. Contact support if access looks wrong.",
+        )
 
+    price_id = None
+    try:
+        items = getattr(sess, "line_items", None)
+        if items and getattr(items, "data", None):
+            price_id = items.data[0].price.id  # type: ignore[attr-defined]
+    except Exception as e:
+        app.logger.exception("Stripe line_items parse error: %s", e)
+
+    email = session.get("user_email") or getattr(sess, "customer_email", None)
+    if not email:
+        return render_template_string(
+            SUCCESS_HTML,
+            user=user,
+            message="Payment processed, but no email was attached. Contact support with your receipt.",
+        )
+
+    users = load_users()
+    stored = users.get(email)
+    if not stored:
+        stored = {
+            "email": email,
+            "password_hash": "",
+            "subscription": "free",
+            "free_used": False,
+            "credits": 0,
+        }
+
+    now = datetime.utcnow()
+
+    if price_id == STRIPE_PRICE_SINGLE:
+        stored["subscription"] = "single"
+        stored["credits"] = int(stored.get("credits", 0) or 0) + 1
+    elif price_id == STRIPE_PRICE_PACK10:
+        stored["subscription"] = "pack10"
+        stored["credits"] = int(stored.get("credits", 0) or 0) + 10
+    elif price_id == STRIPE_PRICE_3MO:
+        stored["subscription"] = "unlimited_3m"
+        stored["membership_expires"] = (now + timedelta(days=90)).isoformat()
+    elif price_id == STRIPE_PRICE_ANNUAL:
+        stored["subscription"] = "unlimited_year"
+        stored["membership_expires"] = (now + timedelta(days=365)).isoformat()
+
+    users[email] = stored
+    save_users(users)
+
+    session["user_email"] = email
     user = get_current_user()
-    return render_template_string(SUCCESS_HTML, user=user)
+
+    return render_template_string(
+        SUCCESS_HTML,
+        user=user,
+        message="Payment received and your PatternCraft.app access has been updated.",
+    )
 
 
-# --------------------------------------------------------------------------------------
-# Signup / login / logout
-# --------------------------------------------------------------------------------------
+# ---------------------- SIGNUP / LOGIN ----------------------
 
 
 @app.get("/signup")
@@ -545,11 +501,10 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "free",  # free, unlimited_3m, unlimited_year
-        "subscription_expires": None,
+        "subscription": "free",
         "free_used": False,
         "credits": 0,
-        "processed_sessions": [],
+        "membership_expires": None,
     }
     save_users(users)
     session["user_email"] = email
@@ -624,14 +579,107 @@ def logout():
     return redirect(url_for("index"))
 
 
-# --------------------------------------------------------------------------------------
-# Pattern generation (account + membership gated)
-# --------------------------------------------------------------------------------------
+# ---------------------- SAMPLE PATTERN ZIP ----------------------
+
+
+@app.get("/sample-pattern.zip")
+def sample_pattern_zip():
+    w, h = 40, 40
+    base = Image.new("RGB", (w, h), (245, 245, 245))
+    draw = ImageDraw.Draw(base)
+    colors = [
+        (239, 68, 68),
+        (249, 115, 22),
+        (234, 179, 8),
+        (34, 197, 94),
+        (59, 130, 246),
+    ]
+
+    patch = 8
+    for py in range(0, h, patch):
+        for px in range(0, w, patch):
+            block_idx = (px // patch + py // patch) % len(colors)
+            base_color = colors[block_idx]
+            alt_color = colors[(block_idx + 2) % len(colors)]
+            style = (px // patch + 2 * (py // patch)) % 3
+
+            if style == 0:
+                draw.rectangle((px, py, px + patch - 1, py + patch - 1), fill=base_color)
+            elif style == 1:
+                for y in range(patch):
+                    for x in range(patch):
+                        if x >= y:
+                            draw.point((px + x, py + y), fill=base_color)
+                        else:
+                            draw.point((px + x, py + y), fill=alt_color)
+            else:
+                for y in range(patch):
+                    color = base_color if y % 2 == 0 else alt_color
+                    draw.line((px, py + y, px + patch - 1, py + y), fill=color)
+
+    max_colors = len(colors)
+    quant = quantize(base, max_colors)
+    counts = palette_counts(quant)
+    sx, sy = quant.size
+
+    cloth_count = 10
+    strands = 2
+    waste_pct = 20
+    finished_w_in = round(sx / float(cloth_count), 2)
+    finished_h_in = round(sy / float(cloth_count), 2)
+
+    grid_img = draw_grid(quant, cell_px=CELL_PX)
+    pal = sorted(counts.keys(), key=lambda c: counts[c], reverse=True)
+    sym_map = assign_symbols(pal)
+    sym_img = draw_symbols_on_grid(quant, cell_px=CELL_PX, sym_map=sym_map)
+    grid_img = sym_img
+
+    out_zip = io.BytesIO()
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        total_stitches = sum(counts.values()) or 1
+        lines = ["hex,r,g,b,stitches,percent,skeins_est"]
+        for (r, g, b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            skeins = skeins_per_color(c, cloth_count, strands, waste_pct / 100.0)
+            lines.append(
+                f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total_stitches):.2f},{skeins:.2f}"
+            )
+        z.writestr("legend.csv", "\n".join(lines))
+
+        meta = {
+            "type": "quilt_sample",
+            "stitch_style": "patchwork",
+            "stitches_w": sx,
+            "stitches_h": sy,
+            "colors": len(counts),
+            "cloth_count": cloth_count,
+            "strands": strands,
+            "waste_percent": waste_pct,
+            "finished_size_in": [finished_w_in, finished_h_in],
+            "notes": (
+                "Sample quilt-style color grid generated by PatternCraft.app "
+                "with grid.png and legend.csv."
+            ),
+        }
+        z.writestr("meta.json", json.dumps(meta, indent=2))
+
+        buf_png = io.BytesIO()
+        grid_img.save(buf_png, format="PNG")
+        z.writestr("grid.png", buf_png.getvalue())
+
+    out_zip.seek(0)
+    return send_file(
+        out_zip,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="patterncraft_sample_quilt.zip",
+    )
+
+
+# ---------------------- PATTERN GENERATOR (ACCOUNT + MEMBERSHIP GATED) ----------------------
 
 
 @app.post("/api/convert")
 def convert():
-    # Require login
     email = session.get("user_email")
     if not email:
         return redirect(url_for("login", msg="Log in to generate patterns."))
@@ -642,18 +690,22 @@ def convert():
         session.pop("user_email", None)
         return redirect(url_for("signup", msg="Create your PatternCraft.app account to continue."))
 
+    subscription = user.get("subscription", "free")
     credits = int(user.get("credits", 0) or 0)
+    free_used = bool(user.get("free_used", False))
+
     mark_free_used = False
     consume_credit = False
 
-    if has_unlimited_access(user):
+    if is_membership_active(user):
         pass
     elif credits > 0:
         consume_credit = True
     else:
-        if user.get("free_used"):
+        if free_used:
             return redirect(url_for("pricing", reason="used_free"))
-        mark_free_used = True
+        else:
+            mark_free_used = True
 
     file = request.files.get("file")
     if not file:
@@ -712,7 +764,9 @@ def convert():
 
             total_stitches = sum(counts.values()) or 1
             lines = ["hex,r,g,b,stitches,percent,skeins_est"]
-            for (r, g, b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            for (r, g, b), c in sorted(
+                counts.items(), key=lambda kv: kv[1], reverse=True
+            ):
                 skeins = skeins_per_color(
                     c, cloth_count, strands, waste_pct / 100.0
                 )
@@ -767,11 +821,13 @@ def convert():
         else:
             return jsonify({"error": "unknown_ptype"}), 400
 
-    if consume_credit:
-        user["credits"] = max(0, credits - 1)
-    if mark_free_used:
-        user["free_used"] = True
-    if consume_credit or mark_free_used:
+    if is_membership_active(user):
+        pass
+    else:
+        if consume_credit and credits > 0:
+            user["credits"] = max(0, credits - 1)
+        if mark_free_used:
+            user["free_used"] = True
         users[email] = user
         save_users(users)
 
@@ -784,9 +840,7 @@ def convert():
     )
 
 
-# --------------------------------------------------------------------------------------
-# Inline HTML templates
-# --------------------------------------------------------------------------------------
+# ---------------------- INLINE HTML: HOMEPAGE ----------------------
 
 HOMEPAGE_HTML = r"""
 <!doctype html>
@@ -797,9 +851,9 @@ HOMEPAGE_HTML = r"""
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     :root{
-      --bg:#F7F4EF;--fg:#111827;--muted:#6b7280;
-      --line:#e5e7eb;--radius:14px;--shadow:0 14px 40px rgba(15,23,42,.18);
-      --accent:#4C7CF3;--accent-soft:#e3ebff;--accent-strong:#1d4ed8;
+      --bg:#F7F4EF;--fg:#222;--muted:#6b6b6b;
+      --line:#e8e4de;--radius:14px;--shadow:0 10px 30px rgba(15,23,42,.15);
+      --accent:#4C7CF3;--accent-soft:#e3ebff;--accent-strong:#173d99;
       --pill:#f97316;
     }
     *{box-sizing:border-box;}
@@ -814,38 +868,38 @@ HOMEPAGE_HTML = r"""
     }
     a{color:#2563eb;text-decoration:none;}
     a:hover{text-decoration:underline;}
-    .wrap{max-width:1120px;margin:0 auto;padding:24px 16px 48px}
+    .wrap{max-width:1040px;margin:0 auto;padding:24px 16px 48px}
     h1{font-size:2.6rem;margin:0 0 8px}
     h2{margin:0 0 10px}
     .topbar{
       display:flex;align-items:center;justify-content:space-between;
       margin-bottom:18px;
     }
-    .brand{font-weight:800;font-size:20px;letter-spacing:.08em;text-transform:uppercase;}
-    .top-links{font-size:13px;color:#4b5563;text-align:right}
-    .top-links span{white-space:nowrap;}
+    .brand{font-weight:800;font-size:20px;letter-spacing:.04em;text-transform:uppercase;}
+    .top-links{font-size:13px;color:#4b5563}
+    .top-links a{margin-left:8px;}
     .chip{
       display:inline-flex;align-items:center;gap:6px;
       padding:4px 10px;border-radius:999px;
-      background:rgba(255,255,255,.9);border:1px solid rgba(148,163,184,.4);
+      background:rgba(255,255,255,.8);border:1px solid rgba(148,163,184,.4);
       font-size:11px;color:#475569;text-transform:uppercase;letter-spacing:.08em;
     }
     .chip-dot{width:8px;height:8px;border-radius:999px;background:#22c55e}
     .card{
       background:#fff;border-radius:var(--radius);
-      border:1px solid rgba(148,163,184,.25);
+      border:1px solid rgba(148,163,184,.3);
       box-shadow:var(--shadow);
       padding:20px;
     }
     .hero{
-      display:grid;grid-template-columns:minmax(0,3fr) minmax(320px,2fr);
-      gap:22px;margin-bottom:30px;align-items:center;
+      display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,2fr);
+      gap:20px;margin-bottom:28px;align-items:center;
     }
-    .hero-tagline{color:var(--muted);max-width:440px;}
+    .hero-tagline{color:var(--muted);max-width:420px;}
     .muted{color:var(--muted);font-size:13px}
     .pill{
       padding:11px 20px;border-radius:999px;
-      background:linear-gradient(135deg,var(--pill),#ea580c);
+      background:linear-gradient(135deg,var(--pill),#f97316);
       color:#fff;border:none;cursor:pointer;
       font-size:14px;font-weight:600;letter-spacing:.02em;
       box-shadow:0 7px 18px rgba(248,113,22,.35);
@@ -879,74 +933,6 @@ HOMEPAGE_HTML = r"""
       font-size:11px;padding:4px 8px;border-radius:999px;
       background:#e5edff;color:#1d4ed8;border:1px solid rgba(129,140,248,.5);
     }
-
-    .hero-visual{
-      position:relative;
-    }
-    .video-card{
-      position:relative;
-      border-radius:20px;
-      overflow:hidden;
-      background:radial-gradient(circle at top,#0f172a,#020617);
-      border:1px solid rgba(15,23,42,.6);
-      box-shadow:0 22px 60px rgba(15,23,42,.65);
-      color:#e5e7eb;
-      min-height:260px;
-    }
-    .video-inner{
-      position:relative;
-      width:100%;
-      aspect-ratio:4/3;
-      overflow:hidden;
-      /* Collage behind the video using two example stills */
-      background:
-        url('/static/patterncraft-example-1.jpg') left 0 top 0 / 45% auto no-repeat,
-        url('/static/patterncraft-example-2.jpg') right 0 bottom 0 / 45% auto no-repeat,
-        radial-gradient(circle at top,#020617,#020617);
-    }
-    .video-inner video{
-      width:100%;
-      height:100%;
-      object-fit:contain;
-      display:block;
-      opacity:.96;
-    }
-    .video-placeholder{
-      position:absolute;inset:0;
-      display:flex;align-items:center;justify-content:center;
-      background:repeating-linear-gradient(
-        45deg,
-        #0f172a 0,
-        #0f172a 6px,
-        #111827 6px,
-        #111827 12px
-      );
-      color:#e5e7eb;
-      font-size:14px;
-      text-align:center;
-      padding:16px;
-    }
-    .video-steps{
-      position:absolute;
-      left:0;right:0;bottom:0;
-      padding:10px 12px 12px;
-      background:linear-gradient(to top,rgba(15,23,42,.95),rgba(15,23,42,.3),transparent);
-      font-size:11px;
-    }
-    .video-steps-title{font-size:12px;font-weight:600;margin-bottom:4px;letter-spacing:.08em;text-transform:uppercase;}
-    .video-steps-row{display:flex;flex-wrap:wrap;gap:6px;}
-    .step-pill{
-      border-radius:999px;
-      padding:4px 8px;
-      background:rgba(15,118,110,.2);
-      border:1px solid rgba(45,212,191,.5);
-      font-size:11px;
-      display:inline-flex;align-items:center;gap:4px;
-    }
-    .step-dot{
-      width:6px;height:6px;border-radius:999px;background:#22c55e;
-    }
-
     .section-title{font-size:1.1rem;margin-bottom:6px}
     .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.2fr)}
     .file{
@@ -990,7 +976,7 @@ HOMEPAGE_HTML = r"""
     label{font-size:13px}
     .controls-note{font-size:11px;color:#94a3b8;margin-top:4px}
     .hidden{display:none}
-    @media (max-width:880px){
+    @media (max-width:860px){
       .hero{grid-template-columns:1fr}
       .make-layout{grid-template-columns:1fr}
     }
@@ -1004,9 +990,20 @@ HOMEPAGE_HTML = r"""
     <div class="top-links">
       <a href="/pricing">Pricing</a>
       {% if user %}
-        <span> · Signed in as {{ user.email }} · {{ plan_label }} · <a href="/logout">Sign out</a></span>
+        · {{ user.email }}
+        {% if user.subscription in ['unlimited_3m','unlimited_year'] %}
+          · Plan: {{ user.subscription }}
+          {% if user.membership_expires %}
+            (until {{ user.membership_expires[:10] }})
+          {% endif %}
+        {% elif user.credits %}
+          · Credits: {{ user.credits }}
+        {% else %}
+          · Free plan
+        {% endif %}
+        · <a href="/logout">Sign out</a>
       {% else %}
-        <span> · <a href="/login">Log in</a> · <a href="/signup">Create account</a></span>
+        · <a href="/login">Log in</a> · <a href="/signup">Create account</a>
       {% endif %}
     </div>
   </div>
@@ -1033,13 +1030,13 @@ HOMEPAGE_HTML = r"""
           </a>
         {% endif %}
         <a class="pill pill-secondary" href="/pricing#how">
-          See the full walkthrough
+          See how it works
         </a>
       </div>
       <div class="hero-note">
-        Step 1: <a href="/pricing#plans">Choose your plan</a> ·
-        Step 2: Upload art and tune your pattern ·
-        Step 3: Download a clean, print-ready ZIP.
+        Step 1: <a href="/pricing#how">See how PatternCraft.app works</a> ·
+        Step 2: <a href="/signup">Create your account</a> ·
+        Step 3: Upload art and generate your pattern ZIP.
       </div>
       <div class="badge-row">
         <span class="badge">One pattern included with every account</span>
@@ -1047,29 +1044,14 @@ HOMEPAGE_HTML = r"""
       </div>
     </div>
 
-    <div class="hero-visual">
-      <div class="video-card">
-        <div class="video-inner">
-          {% if walkthrough_url %}
-            <video src="{{ walkthrough_url }}" autoplay muted loop playsinline></video>
-          {% else %}
-            <div class="video-placeholder">
-              Short walkthrough video goes here. Set WALKTHROUGH_URL in your environment
-              or place a file at static/walkthrough.mp4.
-            </div>
-          {% endif %}
-        </div>
-        <div class="video-steps">
-          <div class="video-steps-title">From photo to pattern</div>
-          <div class="video-steps-row">
-            <span class="step-pill"><span class="step-dot"></span>1. Pick a plan</span>
-            <span class="step-pill"><span class="step-dot"></span>2. Upload your art</span>
-            <span class="step-pill"><span class="step-dot"></span>3. Choose size & colors</span>
-            <span class="step-pill"><span class="step-dot"></span>4. Checkout with Stripe</span>
-            <span class="step-pill"><span class="step-dot"></span>5. Download your ZIP</span>
-          </div>
-        </div>
-      </div>
+    <div class="card">
+      <h2 class="section-title">Why PatternCraft.app</h2>
+      <ul class="muted" style="padding-left:18px">
+        <li>Clean grids with bold 10×10 guides</li>
+        <li>Floss estimates per color for planning</li>
+        <li>Knitting charts that respect row proportions</li>
+        <li>Embroidery outputs ready for your workflow</li>
+      </ul>
     </div>
   </div>
 
@@ -1238,6 +1220,8 @@ HOMEPAGE_HTML = r"""
 </body>
 </html>
 """
+
+# ---------------------- INLINE HTML: SIGNUP / LOGIN / PRICING / SUCCESS ----------------------
 
 SIGNUP_HTML = r"""
 <!doctype html>
@@ -1457,7 +1441,7 @@ footer{border-top:1px solid var(--line);margin-top:24px}
   </div>
 </header>
 
-<section class="wrap" id="plans">
+<section class="wrap">
   <div class="badge">Simple, transparent pricing</div>
   <h1>Choose the plan that fits your stitching</h1>
   <p class="small">Start with a single pattern, save with a pack, or go unlimited.</p>
@@ -1487,7 +1471,7 @@ footer{border-top:1px solid var(--line);margin-top:24px}
 
     <!-- 10-Pattern Pack -->
     <div class="card">
-      <h3>10-Pattern Pack</h3>
+      <h3>10 Pattern Pack</h3>
       <div class="price">$60</div>
       <p class="small">Great for consistent hobby use.</p>
       <ul class="list">
@@ -1506,20 +1490,20 @@ footer{border-top:1px solid var(--line);margin-top:24px}
     <!-- 3-Month Unlimited -->
     <div class="card">
       <h3>3-Month Unlimited</h3>
-      <div class="price">$75 / 3 months</div>
-      <p class="small">Unlimited patterns, billed every 3 months.</p>
+      <div class="price">$75 every 3 months</div>
+      <p class="small">Recurring charge of $75 every 3 months for unlimited patterns.</p>
       <ul class="list">
-        <li>Unlimited pattern conversions while active</li>
-        <li>Higher-resolution output</li>
+        <li>Unlimited pattern conversions</li>
+        <li>Highest-quality output (4× resolution)</li>
         <li>Advanced color tools</li>
         <li>Priority processing</li>
         <li>All export formats + templates</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="unlimited_3m">
-        <button class="btn ghost" type="submit">Start 3-month unlimited</button>
+        <button class="btn ghost" type="submit">Start 3-Month Unlimited</button>
       </form>
-      <p class="small">Renews every 3 months until you cancel in Stripe.</p>
+      <p class="small">Renews every 3 months until you cancel.</p>
     </div>
 
     <!-- Annual Pro Unlimited -->
@@ -1545,41 +1529,28 @@ footer{border-top:1px solid var(--line);margin-top:24px}
 
 <section class="wrap" id="how">
   <h2>How PatternCraft.app works</h2>
-  <p class="small">From product selection to finished pattern ZIP.</p>
+  <p class="small">From photo to stitch-ready pattern in three simple steps.</p>
   <div class="steps">
     <div class="step-card">
       <div class="step-num">1</div>
-      <h3>Select a plan</h3>
+      <h3>Upload your image</h3>
       <p class="small">
-        Pick a single pattern, a 10-pack, or an unlimited plan. Stripe handles secure checkout.
+        Start with a photo, artwork, or logo. PatternCraft analyzes it for stitchable detail.
       </p>
     </div>
     <div class="step-card">
       <div class="step-num">2</div>
-      <h3>Upload your photo</h3>
+      <h3>Choose size & colors</h3>
       <p class="small">
-        Drop in your artwork, fabric design, logo, or illustration. PatternCraft reads the details for stitching.
+        Set stitch width, cloth count, and palette size. Preview your grid with bold 10×10 guides.
       </p>
     </div>
     <div class="step-card">
       <div class="step-num">3</div>
-      <h3>Tune your pattern</h3>
+      <h3>Download your pattern ZIP</h3>
       <p class="small">
-        Choose stitch width, cloth count, color limits, and pattern type (cross-stitch, knitting, or embroidery).
-      </p>
-    </div>
-    <div class="step-card">
-      <div class="step-num">4</div>
-      <h3>Checkout & confirm</h3>
-      <p class="small">
-        Stripe confirms your purchase and PatternCraft unlocks credits or unlimited access for your account.
-      </p>
-    </div>
-    <div class="step-card">
-      <div class="step-num">5</div>
-      <h3>Download your ZIP</h3>
-      <p class="small">
-        Get grid.png, legend.csv, meta.json, and optional PDF or embroidery files – ready to print or import.
+        Download a ZIP with grid.png, legend.csv, meta.json, and optional PDF or embroidery files,
+        ready to print or import into your workflow.
       </p>
     </div>
   </div>
@@ -1633,8 +1604,12 @@ SUCCESS_HTML = r"""
   <div class="wrap">
     <div class="card">
       <h1>Payment received</h1>
-      <p>Thank you{% if user %}, {{ user.email }}{% endif %}. Your PatternCraft.app plan has been updated.</p>
-      <p>You can go back to the tool and start generating patterns right away. Your account tracks credits and unlimited access automatically.</p>
+      <p>Thank you{% if user %}, {{ user.email }}{% endif %}.</p>
+      {% if message %}
+        <p>{{ message }}</p>
+      {% else %}
+        <p>Your PatternCraft.app plan has been updated. You can start generating patterns right away.</p>
+      {% endif %}
       <p style="margin-top:14px;">
         <a href="/">← Back to PatternCraft.app</a>
       </p>
@@ -1643,8 +1618,6 @@ SUCCESS_HTML = r"""
 </body>
 </html>
 """
-
-# --------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     app.run(debug=True)
