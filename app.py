@@ -1,11 +1,9 @@
 from __future__ import annotations
-
 import io
 import json
 import math
 import os
 import zipfile
-from datetime import datetime, timedelta
 from typing import Dict, Tuple, List, Optional
 
 from flask import (
@@ -31,26 +29,29 @@ try:
 except Exception:
     HAS_PYEMB = False
 
+# --------------------------------------------------------------------
+# App + Stripe config
+# --------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-# Stripe configuration
+# Stripe configuration (live secret key is set in Render env: STRIPE_SECRET_KEY)
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
-# Stripe price IDs (from your latest Stripe export, LIVE)
-# Single Pattern – $25 (one‑time)
+# Stripe price IDs (from your latest live-mode CSV export)
+# Single Pattern – $25 one-time
 STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"
-# 10 Pattern Pack – $60 (one‑time)
+# 10 Pattern Pack – $60 one-time
 STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"
-# 3‑Month Unlimited – $75 every 3 months (subscription)
+# 3 Month Unlimited – $75 billed every 3 months (subscription)
 STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"
-# Pro Annual – $99 / year (subscription)
+# Pro Annual – $99/year (subscription)
 STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"
 
-# Simple JSON “database” for users (email → data)
+# Simple JSON “database” for users (saved in repo root as users.json)
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 
-# Config
+# Upload / conversion config
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
@@ -58,7 +59,9 @@ CELL_PX = 12
 MAX_DIM = 8000  # max width/height in pixels
 
 
-# ---------------------- USER STORAGE ----------------------
+# --------------------------------------------------------------------
+# User storage helpers
+# --------------------------------------------------------------------
 def load_users() -> Dict[str, dict]:
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -87,11 +90,9 @@ def get_current_user() -> Optional[dict]:
     return users.get(email)
 
 
-def now_utc() -> datetime:
-    return datetime.utcnow()
-
-
-# ---------------------- IMAGE / PATTERN HELPERS ----------------------
+# --------------------------------------------------------------------
+# Image / pattern helpers
+# --------------------------------------------------------------------
 def clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
@@ -271,7 +272,9 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# ---------------------- BASIC ROUTES ----------------------
+# --------------------------------------------------------------------
+# Basic routes / error handlers
+# --------------------------------------------------------------------
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -284,7 +287,7 @@ def too_large(_e):
 
 @app.errorhandler(Exception)
 def on_error(_e):
-    # Keep generic for users; log in real deployment
+    # In production you’d log this; here we just send a generic error.
     return make_response(jsonify({"error": "server_error"}), 500)
 
 
@@ -300,15 +303,17 @@ def pricing() -> str:
     reason = request.args.get("reason", "")
     message = ""
     if reason == "used_free":
-        message = "You’ve already used your included PatternCraft.app pattern. Choose a plan to keep generating patterns."
-    elif reason == "no_credits":
-        message = "You’ve used all credits on this account. Pick a pack or unlimited plan to continue."
+        message = "You’ve already used your included PatternCraft.app pattern for this account. Choose a plan to keep generating patterns."
     elif reason == "checkout_error":
         message = "We couldn’t start checkout. Please try again or contact support."
+    elif reason == "no_credits":
+        message = "You’ve used all credits on this account. Pick a pack or unlimited plan to continue."
     return render_template_string(PRICING_HTML, user=user, message=message)
 
 
-# ---------------------- CHECKOUT + SUCCESS ----------------------
+# --------------------------------------------------------------------
+# Stripe Checkout + success
+# --------------------------------------------------------------------
 @app.post("/checkout")
 def create_checkout():
     """
@@ -354,55 +359,69 @@ def create_checkout():
 @app.get("/success")
 def success():
     """
-    Called by Stripe after a successful Checkout (via success_url).
-    We look up the session, figure out which price was purchased,
-    and update the logged‑in user’s membership / credits.
+    After Stripe Checkout, we land here. We try to look up the Checkout Session and
+    update the user’s membership (credits or unlimited flags) based on which price was purchased.
     """
     user = get_current_user()
-    session_id = request.args.get("session_id", "")
+    session_id = request.args.get("session_id")
 
-    if user and session_id and stripe.api_key:
+    if session_id and stripe.api_key:
         try:
-            s = stripe.checkout.Session.retrieve(
+            checkout_sess = stripe.checkout.Session.retrieve(
                 session_id,
-                expand=["line_items.data.price", "subscription"]
+                expand=["line_items.data.price"],
             )
-            line_items = getattr(s, "line_items", None)
-            if line_items and line_items.data:
-                price_id = line_items.data[0].price.id
-                users = load_users()
-                stored = users.get(user["email"])
-                if stored:
-                    now = now_utc()
-                    # Single pattern → +1 credit
-                    if price_id == STRIPE_PRICE_SINGLE:
-                        stored["subscription"] = stored.get("subscription", "free")
-                        stored["credits"] = int(stored.get("credits", 0) or 0) + 1
-                    # 10‑pattern pack → +10 credits
-                    elif price_id == STRIPE_PRICE_PACK10:
-                        stored["subscription"] = stored.get("subscription", "free")
-                        stored["credits"] = int(stored.get("credits", 0) or 0) + 10
-                    # 3‑month unlimited (recurring every 3 months on Stripe)
-                    elif price_id == STRIPE_PRICE_3MO:
-                        stored["subscription"] = "unlimited_3m"
-                        expires = now + timedelta(days=90)
-                        stored["unlimited_expires"] = expires.isoformat()
-                    # Annual unlimited
-                    elif price_id == STRIPE_PRICE_ANNUAL:
-                        stored["subscription"] = "unlimited_year"
-                        expires = now + timedelta(days=365)
-                        stored["unlimited_expires"] = expires.isoformat()
+            price_id = None
+            line_items = checkout_sess.get("line_items")
+            if line_items and line_items.get("data"):
+                price_obj = line_items["data"][0].get("price")
+                if price_obj:
+                    price_id = price_obj.get("id")
 
-                    users[stored["email"]] = stored
-                    save_users(users)
+            email = checkout_sess.get("client_reference_id") or (
+                (checkout_sess.get("customer_details") or {}).get("email")
+            )
+
+            if email and price_id:
+                users = load_users()
+                u = users.get(email)
+                if not u:
+                    # Should not happen often because checkout requires login,
+                    # but if it does, create a minimal record.
+                    u = {
+                        "email": email,
+                        "password_hash": "",
+                        "subscription": "free",
+                        "free_used": False,
+                        "credits": 0,
+                    }
+
+                # Map Stripe price to membership
+                credits = int(u.get("credits", 0) or 0)
+                if price_id == STRIPE_PRICE_SINGLE:
+                    u["subscription"] = "single"
+                    u["credits"] = credits + 1
+                elif price_id == STRIPE_PRICE_PACK10:
+                    u["subscription"] = "pack10"
+                    u["credits"] = credits + 10
+                elif price_id == STRIPE_PRICE_3MO:
+                    u["subscription"] = "unlimited_3m"
+                elif price_id == STRIPE_PRICE_ANNUAL:
+                    u["subscription"] = "unlimited_year"
+
+                users[email] = u
+                save_users(users)
         except Exception:
-            # On any failure, we still show success page; user can contact support
+            # If anything goes wrong here we still show the success page,
+            # but the account update might need manual help.
             pass
 
     return render_template_string(SUCCESS_HTML, user=user)
 
 
-# ---------------------- SIGNUP / LOGIN ----------------------
+# --------------------------------------------------------------------
+# Signup / login / logout
+# --------------------------------------------------------------------
 @app.get("/signup")
 def signup() -> str:
     user = get_current_user()
@@ -441,10 +460,9 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "free",   # free, unlimited_3m, unlimited_year
-        "free_used": False,       # has used free pattern
-        "credits": 0,             # used for single / pack10 purchases
-        "unlimited_expires": None # ISO timestamp when unlimited access ends
+        "subscription": "free",  # free, single, pack10, unlimited_3m, unlimited_year
+        "free_used": False,
+        "credits": 0,            # used for Single / 10‑Pack
     }
     save_users(users)
     session["user_email"] = email
@@ -517,14 +535,15 @@ def logout():
     return redirect(url_for("index"))
 
 
-# ---------------------- SAMPLE PATTERN ZIP ----------------------
+# --------------------------------------------------------------------
+# Optional sample pattern ZIP (simple quilt-style demo)
+# --------------------------------------------------------------------
 @app.get("/sample-pattern.zip")
 def sample_pattern_zip():
     """
     Serve a sample quilt-style pattern ZIP with a grid and legend.
     Uses a synthetic patchwork-style chart generated in code.
     """
-    # Create a small quilt-style patchwork image
     w, h = 40, 40
     base = Image.new("RGB", (w, h), (245, 245, 245))
     draw = ImageDraw.Draw(base)
@@ -536,21 +555,18 @@ def sample_pattern_zip():
         (59, 130, 246),   # blue
     ]
 
-    patch = 8  # size of each quilt block in pixels
+    patch = 8
     for py in range(0, h, patch):
         for px in range(0, w, patch):
             block_idx = (px // patch + py // patch) % len(colors)
             base_color = colors[block_idx]
             alt_color = colors[(block_idx + 2) % len(colors)]
 
-            # Different block styles for a “quilt” feel
             style = (px // patch + 2 * (py // patch)) % 3
 
             if style == 0:
-                # Solid block
                 draw.rectangle((px, py, px + patch - 1, py + patch - 1), fill=base_color)
             elif style == 1:
-                # Diagonal half-square triangle
                 for y in range(patch):
                     for x in range(patch):
                         if x >= y:
@@ -558,12 +574,10 @@ def sample_pattern_zip():
                         else:
                             draw.point((px + x, py + y), fill=alt_color)
             else:
-                # Stripes inside block
                 for y in range(patch):
                     color = base_color if y % 2 == 0 else alt_color
                     draw.line((px, py + y, px + patch - 1, py + y), fill=color)
 
-    # Treat as a quilt-style cross-stitch chart
     max_colors = len(colors)
     quant = quantize(base, max_colors)
     counts = palette_counts(quant)
@@ -575,7 +589,6 @@ def sample_pattern_zip():
     finished_w_in = round(sx / float(cloth_count), 2)
     finished_h_in = round(sy / float(cloth_count), 2)
 
-    # Symbol grid
     grid_img = draw_grid(quant, cell_px=CELL_PX)
     pal = sorted(counts.keys(), key=lambda c: counts[c], reverse=True)
     sym_map = assign_symbols(pal)
@@ -584,7 +597,6 @@ def sample_pattern_zip():
 
     out_zip = io.BytesIO()
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
-        # legend.csv with color counts and skein estimates
         total_stitches = sum(counts.values()) or 1
         lines = ["hex,r,g,b,stitches,percent,skeins_est"]
         for (r, g, b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
@@ -621,25 +633,12 @@ def sample_pattern_zip():
     )
 
 
-# ---------------------- MEMBERSHIP HELPERS ----------------------
-def has_active_unlimited(user: dict) -> bool:
-    sub = user.get("subscription")
-    if sub not in ("unlimited_3m", "unlimited_year"):
-        return False
-    expires_str = user.get("unlimited_expires")
-    if not expires_str:
-        return False
-    try:
-        expires = datetime.fromisoformat(expires_str)
-    except Exception:
-        return False
-    return now_utc() <= expires
-
-
-# ---------------------- PATTERN GENERATOR (ACCOUNT + MEMBERSHIP GATED) ----------------------
+# --------------------------------------------------------------------
+# Pattern generator (account + membership gating)
+# --------------------------------------------------------------------
 @app.post("/api/convert")
 def convert():
-    # Require an account
+    # Require login
     email = session.get("user_email")
     if not email:
         return redirect(url_for("login", msg="Log in to generate patterns."))
@@ -650,27 +649,21 @@ def convert():
         session.pop("user_email", None)
         return redirect(url_for("signup", msg="Create your PatternCraft.app account to continue."))
 
-    # Refresh unlimited status in case it expired
-    if user.get("subscription") in ("unlimited_3m", "unlimited_year") and not has_active_unlimited(user):
-        user["subscription"] = "free"
-        user["unlimited_expires"] = None
-
-    subscription = user.get("subscription", "free")  # free, unlimited_3m, unlimited_year
+    subscription = user.get("subscription", "free")  # free, single, pack10, unlimited_3m, unlimited_year
     credits = int(user.get("credits", 0) or 0)
-    free_used = bool(user.get("free_used", False))
     mark_free_used = False
     consume_credit = False
 
     # Membership logic:
-    # - If active unlimited: unlimited usage, no free/credit changes.
-    # - Else if credits > 0: consume 1 credit per convert.
-    # - Else: free tier, 1 pattern per account.
-    if has_active_unlimited(user):
+    # - unlimited_3m / unlimited_year: unlimited usage (Pro tool)
+    # - credits > 0: consume 1 credit per convert
+    # - else: free tier, 1 pattern per account
+    if subscription in ("unlimited_3m", "unlimited_year"):
         pass
     elif credits > 0:
         consume_credit = True
     else:
-        if free_used:
+        if user.get("free_used"):
             return redirect(url_for("pricing", reason="used_free"))
         else:
             mark_free_used = True
@@ -684,8 +677,8 @@ def convert():
     try:
         ptype = request.form.get("ptype", "cross")
         stitch_style = request.form.get("stitch_style", "full")
-        stitch_w_raw = int(request.form.get("width", 120))
-        max_colors_raw = int(request.form.get("colors", 16))
+        stitch_w = clamp(int(request.form.get("width", 120)), 20, 400)
+        max_colors = clamp(int(request.form.get("colors", 16)), 2, 60)
         cloth_count = clamp(int(request.form.get("count", 14)), 10, 22)
         strands = clamp(int(request.form.get("strands", 2)), 1, 6)
         waste_pct = clamp(int(request.form.get("waste", 20)), 0, 60)
@@ -696,13 +689,11 @@ def convert():
     except Exception:
         return jsonify({"error": "invalid_parameters"}), 400
 
-    # Slightly higher limits for Pro plans
-    is_pro_unlimited = has_active_unlimited(user)
-    max_width_limit = 400 if is_pro_unlimited else 250
-    max_color_limit = 60 if is_pro_unlimited else 30
-
-    stitch_w = clamp(stitch_w_raw, 20, max_width_limit)
-    max_colors = clamp(max_colors_raw, 2, max_color_limit)
+    # Pro vs non‑pro limits: Pro (3‑Month / Annual) can go up to 400×60,
+    # others are softly capped smaller even if UI allows larger.
+    if subscription not in ("unlimited_3m", "unlimited_year"):
+        stitch_w = clamp(stitch_w, 20, 220)
+        max_colors = clamp(max_colors, 2, 30)
 
     try:
         base = open_image(file)
@@ -767,12 +758,10 @@ def convert():
                 "waste_percent": waste_pct,
                 "finished_size_in": [finished_w_in, finished_h_in],
                 "notes": note,
-                "plan": subscription,
             }
             z.writestr("meta.json", json.dumps(meta, indent=2))
 
             buf_png = io.BytesIO()
-            # IMPORTANT: exports are full resolution, no watermark
             grid_img.save(buf_png, format="PNG")
             z.writestr("grid.png", buf_png.getvalue())
             if pdf_bytes:
@@ -792,7 +781,6 @@ def convert():
                         "stitch_style": "run",
                         "points": len(pts),
                         "pyembroidery": HAS_PYEMB,
-                        "plan": subscription,
                     },
                     indent=2,
                 ),
@@ -805,10 +793,9 @@ def convert():
         user["credits"] = max(0, credits - 1)
     if mark_free_used:
         user["free_used"] = True
-
-    # persist user updates (credits, free_used, downgraded unlimited, etc.)
-    users[email] = user
-    save_users(users)
+    if consume_credit or mark_free_used:
+        users[email] = user
+        save_users(users)
 
     out_zip.seek(0)
     return send_file(
@@ -819,7 +806,9 @@ def convert():
     )
 
 
-# ---------------------- INLINE HTML: HOMEPAGE ----------------------
+# --------------------------------------------------------------------
+# INLINE HTML: HOMEPAGE (with “ad” slideshow)
+# --------------------------------------------------------------------
 HOMEPAGE_HTML = r"""
 <!doctype html>
 <html lang="en">
@@ -888,7 +877,7 @@ HOMEPAGE_HTML = r"""
     }
     .pill:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(248,113,22,.45);}
     .pill-secondary{
-      background:#fff;color:var(--fg);
+      background:#fff;color:#111;
       border:1px solid rgba(148,163,184,.5);
       box-shadow:none;
     }
@@ -912,7 +901,7 @@ HOMEPAGE_HTML = r"""
       background:#e5edff;color:#1d4ed8;border:1px solid rgba(129,140,248,.5);
     }
 
-    /* "Video ad" slideshow styling */
+    /* “Video ad” slideshow styling */
     .video-shell{
       display:flex;
       flex-direction:column;
@@ -964,6 +953,7 @@ HOMEPAGE_HTML = r"""
       flex-direction:column;
       justify-content:space-between;
       min-width:0;
+      gap:6px;
     }
     .video-before-title,
     .video-after-title{
@@ -971,7 +961,7 @@ HOMEPAGE_HTML = r"""
       text-transform:uppercase;
       letter-spacing:.12em;
       color:#6b7280;
-      margin-bottom:6px;
+      margin-bottom:4px;
     }
     .video-thumb{
       flex:1;
@@ -981,32 +971,65 @@ HOMEPAGE_HTML = r"""
       position:relative;
       overflow:hidden;
     }
-    .video-thumb::before{
+    /* Plan tiles */
+    .video-thumb.plans{
+      background-image:
+        linear-gradient(135deg,#fee2e2,#fce7f3,#e0f2fe);
+    }
+    .video-thumb.plans-highlight{
+      background-image:
+        linear-gradient(135deg,#fef3c7,#bbf7d0,#e0f2fe);
+    }
+    /* Quilt photo (fallback pastel if image missing) */
+    .video-thumb.quilt-photo{
+      background-image:
+        url('/static/quilt_photo.jpg'),
+        linear-gradient(135deg,#fee2e2,#fce7f3,#e0f2fe);
+    }
+    /* Quilt pattern close-up (grid overlay + optional PNG) */
+    .video-thumb.quilt-pattern{
+      background-image:
+        url('/static/quilt_pattern.png'),
+        linear-gradient(135deg,#fefce8,#e0f2fe);
+    }
+    .video-thumb.quilt-pattern::before{
       content:"";
       position:absolute;
       inset:0;
-      opacity:.2;
+      opacity:.45;
       background-image:
-        linear-gradient(to right,rgba(15,23,42,.4) 1px,transparent 1px),
-        linear-gradient(to bottom,rgba(15,23,42,.4) 1px,transparent 1px);
-      background-size:12px 12px;
+        linear-gradient(to right,rgba(15,23,42,.6) 1px,transparent 1px),
+        linear-gradient(to bottom,rgba(15,23,42,.6) 1px,transparent 1px);
+      background-size:10px 10px;
       mix-blend-mode:multiply;
     }
-    .video-thumb.photo-1{
-      background-image:linear-gradient(135deg,#fee2e2,#fce7f3,#e0f2fe);
-    }
-    .video-thumb.photo-2{
-      background-image:linear-gradient(135deg,#fef3c7,#bbf7d0,#e0f2fe);
-    }
-    .video-thumb.photo-3{
-      background-image:linear-gradient(135deg,#e0f2fe,#ddd6fe,#fce7f3);
-    }
-    .video-thumb.pattern{
+    .video-thumb.brand-soft{
       background-image:
-        linear-gradient(135deg,#fefce8,#e0f2fe),
-        repeating-linear-gradient(90deg,transparent 0,transparent 10px,rgba(148,163,184,.7) 10px,rgba(148,163,184,.7) 11px),
-        repeating-linear-gradient(180deg,transparent 0,transparent 10px,rgba(148,163,184,.7) 10px,rgba(148,163,184,.7) 11px);
-      background-blend-mode:soft-light;
+        linear-gradient(135deg,#e0f2fe,#ddd6fe,#fce7f3);
+    }
+    .video-thumb.brand-logo{
+      background-image:
+        radial-gradient(circle at top left,#fef3c7,#fce7f3,#e0f2fe);
+    }
+    .brand-overlay{
+      position:absolute;
+      inset:0;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      gap:4px;
+      text-align:center;
+    }
+    .brand-name{
+      font-weight:800;
+      font-size:18px;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+    }
+    .brand-line{
+      font-size:12px;
+      color:#374151;
     }
     .video-caption{
       font-size:12px;
@@ -1028,7 +1051,7 @@ HOMEPAGE_HTML = r"""
       background:rgba(59,130,246,.08);
       color:#1d4ed8;
       display:inline-block;
-      margin-top:6px;
+      margin-top:2px;
     }
 
     .section-title{font-size:1.1rem;margin-bottom:6px}
@@ -1059,7 +1082,7 @@ HOMEPAGE_HTML = r"""
       margin-top:6px;font-size:12px;color:#065f46;background:#d1fae5;
       border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center;gap:6px;
     }
-    .free-dot{width:8px;height:8px;border-radius:999px	background:#10b981}
+    .free-dot{width:8px;height:8px;border-radius:999px;background:#10b981}
     fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0}
     legend{font-size:13px;padding:0 4px}
     .row{display:flex;flex-wrap:wrap;gap:12px}
@@ -1077,7 +1100,7 @@ HOMEPAGE_HTML = r"""
     @media (max-width:860px){
       .hero{grid-template-columns:1fr}
       .make-layout{grid-template-columns:1fr}
-      .video-frame{height:200px;}
+      .video-frame{height:220px;}
     }
   </style>
 </head>
@@ -1133,55 +1156,78 @@ HOMEPAGE_HTML = r"""
       </div>
     </div>
 
-    <!-- "Video ad" style slideshow -->
+    <!-- 15‑second “ad” = 4 slides × ~3.75s -->
     <div class="video-shell">
-      <div class="video-label">PatternCraft in action</div>
+      <div class="video-label">From plan to finished pattern</div>
       <div class="video-frame" id="videoFrame">
+        <!-- Slide 1: choose a product -->
         <div class="video-slide active">
           <div class="video-before">
-            <div class="video-before-title">Artwork</div>
-            <div class="video-thumb photo-1"></div>
-            <span class="video-tag">Uploaded as a pastel illustration</span>
+            <div class="video-before-title">Step 1 · Choose a plan</div>
+            <div class="video-thumb plans"></div>
+            <span class="video-tag">Single • 10‑Pack • 3‑Month Unlimited • Pro Annual</span>
           </div>
           <div class="video-arrow">→</div>
           <div class="video-after">
-            <div class="video-after-title">Cross-stitch pattern</div>
-            <div class="video-thumb pattern"></div>
-            <span class="video-tag">Clean grid with legend + floss estimates</span>
+            <div class="video-after-title">Transparent pricing</div>
+            <div class="video-thumb plans-highlight"></div>
+            <span class="video-tag">Pick what fits your stitching workflow.</span>
           </div>
         </div>
 
+        <!-- Slide 2: upload quilt JPG -->
         <div class="video-slide">
           <div class="video-before">
-            <div class="video-before-title">Phone photo</div>
-            <div class="video-thumb photo-2"></div>
-            <span class="video-tag">Pet portrait straight from your camera</span>
+            <div class="video-before-title">Step 2 · Upload your quilt image</div>
+            <div class="video-thumb quilt-photo"></div>
+            <span class="video-tag">Drop in a photo or artwork (JPG/PNG).</span>
           </div>
           <div class="video-arrow">→</div>
           <div class="video-after">
-            <div class="video-after-title">Knitting chart</div>
-            <div class="video-thumb pattern"></div>
-            <span class="video-tag">Rows compressed to match real-world gauge</span>
+            <div class="video-after-title">Preview your project</div>
+            <div class="video-thumb brand-soft"></div>
+            <span class="video-tag">Sized to your fabric and stitch count.</span>
           </div>
         </div>
 
+        <!-- Slide 3: close‑up pattern from the tool -->
         <div class="video-slide">
           <div class="video-before">
-            <div class="video-before-title">Logo or graphic</div>
-            <div class="video-thumb photo-3"></div>
-            <span class="video-tag">Crisp shapes, limited palette</span>
+            <div class="video-before-title">Step 3 · PatternCraft converts it</div>
+            <div class="video-thumb quilt-pattern"></div>
+            <span class="video-tag">Clean grid, bold 10×10 lines, full legend.</span>
           </div>
           <div class="video-arrow">→</div>
           <div class="video-after">
-            <div class="video-after-title">Embroidery-ready</div>
-            <div class="video-thumb pattern"></div>
-            <span class="video-tag">Run-stitch path you can take into your software</span>
+            <div class="video-after-title">Stitch‑ready details</div>
+            <div class="video-thumb quilt-pattern"></div>
+            <span class="video-tag">Zoom in to check every square before you print.</span>
+          </div>
+        </div>
+
+        <!-- Slide 4: brand lockup -->
+        <div class="video-slide">
+          <div class="video-before">
+            <div class="video-before-title">Step 4 · Stitch with confidence</div>
+            <div class="video-thumb brand-soft"></div>
+            <span class="video-tag">Print, share, or sell your finished pattern.</span>
+          </div>
+          <div class="video-arrow">→</div>
+          <div class="video-after">
+            <div class="video-after-title">PatternCraft.app</div>
+            <div class="video-thumb brand-logo">
+              <div class="brand-overlay">
+                <div class="brand-name">PATTERNCRAFT.APP</div>
+                <div class="brand-line">Turn images into stitchable, sellable patterns.</div>
+              </div>
+            </div>
+            <span class="video-tag">Built for quilters, cross‑stitchers, and pattern shops.</span>
           </div>
         </div>
       </div>
       <div class="video-caption">
-        A looping preview of what PatternCraft.app does: your images in, stitchable patterns out —
-        with colors, grid, and fabric size handled for you.
+        A quick peek at the flow: pick a plan, upload your quilt or artwork, and PatternCraft.app turns it
+        into a detailed stitch chart with legend and export‑ready files.
       </div>
     </div>
   </div>
@@ -1348,7 +1394,7 @@ HOMEPAGE_HTML = r"""
   });
   onTypeChange();
 
-  // Simple slideshow for the "video" section
+  // 4 slides × 3.75s ≈ 15s loop
   (function(){
     const slides = Array.from(document.querySelectorAll('.video-slide'));
     if (!slides.length) return;
@@ -1359,7 +1405,7 @@ HOMEPAGE_HTML = r"""
       const next = slides[i];
       if (current) current.classList.remove('active');
       if (next) next.classList.add('active');
-    }, 2600);
+    }, 3750);
   })();
 </script>
 </body>
@@ -1367,7 +1413,9 @@ HOMEPAGE_HTML = r"""
 """
 
 
-# ---------------------- INLINE HTML: SIGNUP / LOGIN / PRICING / SUCCESS ----------------------
+# --------------------------------------------------------------------
+# INLINE HTML: SIGNUP / LOGIN / PRICING / SUCCESS
+# --------------------------------------------------------------------
 SIGNUP_HTML = r"""
 <!doctype html>
 <html lang="en">
@@ -1632,11 +1680,11 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       <p class="small">Save big vs buying singles.</p>
     </div>
 
-    <!-- 3-Month Unlimited -->
+    <!-- 3-Month Unlimited (subscription) -->
     <div class="card">
       <h3>3-Month Unlimited</h3>
       <div class="price">$75 / 3 months</div>
-      <p class="small">Recurring charge every 3 months until cancelled.</p>
+      <p class="small">Recurring subscription billed every 3 months.</p>
       <ul class="list">
         <li>Unlimited pattern conversions</li>
         <li>Higher-resolution output</li>
@@ -1646,9 +1694,9 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="unlimited_3m">
-        <button class="btn ghost" type="submit">Start 3-month plan</button>
+        <button class="btn ghost" type="submit">Start 3-Month Unlimited</button>
       </form>
-      <p class="small">Perfect for focused projects or stitching seasons.</p>
+      <p class="small">Perfect for focused seasons or big quilt projects.</p>
     </div>
 
     <!-- Annual Pro Unlimited -->
@@ -1665,7 +1713,7 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="unlimited_year">
-        <button class="btn ghost" type="submit">Go Pro annual</button>
+        <button class="btn ghost" type="submit">Go Pro Annual</button>
       </form>
       <p class="small">Best value if you stitch more than 4 patterns a year.</p>
     </div>
@@ -1678,16 +1726,16 @@ footer{border-top:1px solid var(--line);margin-top:24px}
   <div class="steps">
     <div class="step-card">
       <div class="step-num">1</div>
-      <h3>Upload your image</h3>
+      <h3>Pick your plan</h3>
       <p class="small">
-        Start with a photo, artwork, or logo. PatternCraft analyzes it for stitchable detail.
+        Choose a single pattern, credit pack, or unlimited plan. Every account starts with one pattern included.
       </p>
     </div>
     <div class="step-card">
       <div class="step-num">2</div>
-      <h3>Choose size & colors</h3>
+      <h3>Upload your image</h3>
       <p class="small">
-        Set stitch width, cloth count, and palette size. Preview your grid with bold 10×10 guides.
+        Start with a photo, artwork, or logo. PatternCraft analyzes it for stitchable detail and color.
       </p>
     </div>
     <div class="step-card">
@@ -1750,7 +1798,7 @@ SUCCESS_HTML = r"""
     <div class="card">
       <h1>Payment received</h1>
       <p>Thank you{% if user %}, {{ user.email }}{% endif %}. Your PatternCraft.app plan has been updated.</p>
-      <p>You can go back to the tool and start generating patterns right away. Your membership duration and credits are now stored on your account.</p>
+      <p>You can go back to the tool and start generating patterns right away. If anything looks off with your account, contact support and mention your email and purchase.</p>
       <p style="margin-top:14px;">
         <a href="/">← Back to PatternCraft.app</a>
       </p>
@@ -1761,4 +1809,6 @@ SUCCESS_HTML = r"""
 """
 
 if __name__ == "__main__":
+    # For local development
     app.run(debug=True)
+
