@@ -1,12 +1,11 @@
 from __future__ import annotations
-
 import io
 import json
 import math
 import os
 import zipfile
-from datetime import datetime, timedelta
 from typing import Dict, Tuple, List, Optional
+from datetime import datetime, timedelta
 
 from flask import (
     Flask,
@@ -27,7 +26,6 @@ import stripe
 # Optional embroidery support
 try:
     from pyembroidery import EmbPattern, write_dst, write_pes  # type: ignore
-
     HAS_PYEMB = True
 except Exception:
     HAS_PYEMB = False
@@ -38,11 +36,11 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 # Stripe configuration
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
-# Stripe price IDs (LIVE – from your latest CSV)
-STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"      # Single Pattern – $25
-STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"      # 10 Pattern Pack – $60
-STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"         # 3-Month Unlimited – $75 every 3 months
-STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"      # Pro Annual – $99/year
+# Stripe price IDs (LIVE) – make sure these match Live mode in your dashboard
+STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"   # Single Pattern – $25 one-time
+STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"   # 10 Pattern Pack – $60 one-time
+STRIPE_PRICE_3MO    = "price_1SXTFUCINTImVye2JwOxUN55"   # 3-Month Unlimited – $75 every 3 months
+STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"   # Pro Annual – $99/year
 
 # Simple JSON “database” for users
 USERS_FILE = os.path.join(os.path.dirname(__file__), "users.json")
@@ -55,9 +53,7 @@ CELL_PX = 12
 MAX_DIM = 8000  # max width/height in pixels
 
 
-# ---------------------- USER STORAGE / MEMBERSHIP ----------------------
-
-
+# ---------------------- USER STORAGE ----------------------
 def load_users() -> Dict[str, dict]:
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -86,24 +82,20 @@ def get_current_user() -> Optional[dict]:
     return users.get(email)
 
 
-def is_membership_active(user: dict) -> bool:
-    """Unlimited access for 3‑month or annual plans until membership_expires."""
-    sub = user.get("subscription")
-    if sub not in ("unlimited_3m", "unlimited_year"):
-        return False
-    exp_str = user.get("membership_expires")
-    if not exp_str:
-        return False
+def now_utc() -> datetime:
+    return datetime.utcnow()
+
+
+def parse_time(v: Optional[str]) -> Optional[datetime]:
+    if not v:
+        return None
     try:
-        exp = datetime.fromisoformat(exp_str)
+        return datetime.fromisoformat(v)
     except Exception:
-        return False
-    return datetime.utcnow() < exp
+        return None
 
 
 # ---------------------- IMAGE / PATTERN HELPERS ----------------------
-
-
 def clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
@@ -225,9 +217,7 @@ def skeins_per_color(stitches: int, cloth_count: int, strands: int, waste: float
     return (stitches * per_stitch_cm) / skein_cm
 
 
-def knit_aspect_resize(
-    img: Image.Image, stitches_w: int, row_aspect: float = 0.8
-) -> Image.Image:
+def knit_aspect_resize(img: Image.Image, stitches_w: int, row_aspect: float = 0.8) -> Image.Image:
     """Knitting charts: visually shorter rows for preview."""
     resized = resize_for_stitch_width(img, stitches_w)
     w, h = resized.size
@@ -285,9 +275,7 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# ---------------------- BASIC ROUTES / ERRORS ----------------------
-
-
+# ---------------------- BASIC ROUTES ----------------------
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -299,12 +287,9 @@ def too_large(_e):
 
 
 @app.errorhandler(Exception)
-def on_error(e):
-    app.logger.exception("Unhandled error: %s", e)
+def on_error(_e):
+    # In production you’d log this.
     return make_response(jsonify({"error": "server_error"}), 500)
-
-
-# ---------------------- HOME / PRICING ----------------------
 
 
 @app.get("/")
@@ -319,34 +304,24 @@ def pricing() -> str:
     reason = request.args.get("reason", "")
     message = ""
     if reason == "used_free":
-        message = (
-            "You’ve already used your included PatternCraft.app pattern for this account. "
-            "Pick a plan to keep generating patterns."
-        )
+        message = "You’ve already used your included PatternCraft.app pattern. Choose a plan to keep generating patterns."
     elif reason == "no_credits":
-        message = "You’ve used all available credits on this account. Choose a pack or unlimited plan to continue."
+        message = "You’ve used all credits on this account. Pick a pack or unlimited plan to continue."
     elif reason == "checkout_error":
         message = "We couldn’t start checkout. Please try again or contact support."
     return render_template_string(PRICING_HTML, user=user, message=message)
 
 
 # ---------------------- CHECKOUT + SUCCESS ----------------------
-
-
 @app.post("/checkout")
 def create_checkout():
     """
     Create a Stripe Checkout Session for the selected plan.
-    Single, Pack10: one-time payments; 3-Month + Annual: subscriptions.
+    Requires the user to be logged in so we can tie the purchase to their account.
     """
     email = session.get("user_email")
     if not email:
-        return redirect(
-            url_for(
-                "login",
-                msg="Log in or create an account before purchasing a plan.",
-            )
-        )
+        return redirect(url_for("login", msg="Log in or create an account before purchasing a plan."))
 
     plan = (request.form.get("plan") or "").strip()
 
@@ -358,7 +333,7 @@ def create_checkout():
         mode = "payment"
     elif plan == "unlimited_3m":
         price_id = STRIPE_PRICE_3MO
-        mode = "subscription"  # 3‑month recurring subscription
+        mode = "subscription"
     elif plan == "unlimited_year":
         price_id = STRIPE_PRICE_ANNUAL
         mode = "subscription"
@@ -371,11 +346,11 @@ def create_checkout():
             line_items=[{"price": price_id, "quantity": 1}],
             customer_email=email,
             client_reference_id=email,
+            metadata={"plan": plan, "email": email},
             success_url=url_for("success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
             cancel_url=url_for("pricing", _external=True),
         )
-    except Exception as e:
-        app.logger.exception("Stripe checkout error: %s", e)
+    except Exception:
         return redirect(url_for("pricing", reason="checkout_error"))
 
     return redirect(checkout_session.url)
@@ -383,86 +358,46 @@ def create_checkout():
 
 @app.get("/success")
 def success():
-    """
-    After Stripe Checkout, use the session_id to look up which price was purchased
-    and update the user’s membership/credits accordingly.
-    """
+    session_id = request.args.get("session_id")
     user = get_current_user()
-    session_id = request.args.get("session_id", "")
-    if not session_id:
-        return render_template_string(SUCCESS_HTML, user=user, message="Payment received.")
+    if session_id:
+        try:
+            cs = stripe.checkout.Session.retrieve(session_id)
+            email = cs.get("customer_email") or cs.get("client_reference_id")
+            metadata = cs.get("metadata") or {}
+            plan = metadata.get("plan") if isinstance(metadata, dict) else None
 
-    try:
-        sess = stripe.checkout.Session.retrieve(
-            session_id,
-            expand=["line_items"],
-        )
-    except Exception as e:
-        app.logger.exception("Stripe session retrieve error: %s", e)
-        return render_template_string(
-            SUCCESS_HTML,
-            user=user,
-            message="Payment received, but we couldn’t confirm the details. Contact support if access looks wrong.",
-        )
+            if email and plan:
+                users = load_users()
+                u = users.get(email)
+                if u:
+                    u.setdefault("subscription", "free")
+                    u.setdefault("credits", 0)
+                    u.setdefault("free_used", True)
+                    u.setdefault("unlimited_until", None)
 
-    price_id = None
-    try:
-        items = getattr(sess, "line_items", None)
-        if items and getattr(items, "data", None):
-            price_id = items.data[0].price.id  # type: ignore[attr-defined]
-    except Exception as e:
-        app.logger.exception("Stripe line_items parse error: %s", e)
+                    if plan == "single":
+                        u["subscription"] = "single"
+                        u["credits"] = int(u.get("credits", 0) or 0) + 1
+                    elif plan == "pack10":
+                        u["subscription"] = "pack10"
+                        u["credits"] = int(u.get("credits", 0) or 0) + 10
+                    elif plan == "unlimited_3m":
+                        u["subscription"] = "unlimited_3m"
+                        u["unlimited_until"] = (now_utc() + timedelta(days=90)).isoformat()
+                    elif plan == "unlimited_year":
+                        u["subscription"] = "unlimited_year"
+                        u["unlimited_until"] = (now_utc() + timedelta(days=365)).isoformat()
 
-    email = session.get("user_email") or getattr(sess, "customer_email", None)
-    if not email:
-        return render_template_string(
-            SUCCESS_HTML,
-            user=user,
-            message="Payment processed, but no email was attached. Contact support with your receipt.",
-        )
+                    users[email] = u
+                    save_users(users)
+        except Exception:
+            pass
 
-    users = load_users()
-    stored = users.get(email)
-    if not stored:
-        stored = {
-            "email": email,
-            "password_hash": "",
-            "subscription": "free",
-            "free_used": False,
-            "credits": 0,
-        }
-
-    now = datetime.utcnow()
-
-    if price_id == STRIPE_PRICE_SINGLE:
-        stored["subscription"] = "single"
-        stored["credits"] = int(stored.get("credits", 0) or 0) + 1
-    elif price_id == STRIPE_PRICE_PACK10:
-        stored["subscription"] = "pack10"
-        stored["credits"] = int(stored.get("credits", 0) or 0) + 10
-    elif price_id == STRIPE_PRICE_3MO:
-        stored["subscription"] = "unlimited_3m"
-        stored["membership_expires"] = (now + timedelta(days=90)).isoformat()
-    elif price_id == STRIPE_PRICE_ANNUAL:
-        stored["subscription"] = "unlimited_year"
-        stored["membership_expires"] = (now + timedelta(days=365)).isoformat()
-
-    users[email] = stored
-    save_users(users)
-
-    session["user_email"] = email
-    user = get_current_user()
-
-    return render_template_string(
-        SUCCESS_HTML,
-        user=user,
-        message="Payment received and your PatternCraft.app access has been updated.",
-    )
+    return render_template_string(SUCCESS_HTML, user=user)
 
 
 # ---------------------- SIGNUP / LOGIN ----------------------
-
-
 @app.get("/signup")
 def signup() -> str:
     user = get_current_user()
@@ -501,10 +436,10 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "free",
+        "subscription": "free",  # free, single, pack10, unlimited_3m, unlimited_year
         "free_used": False,
         "credits": 0,
-        "membership_expires": None,
+        "unlimited_until": None,
     }
     save_users(users)
     session["user_email"] = email
@@ -553,10 +488,7 @@ def login_post():
             return redirect(
                 url_for(
                     "signup",
-                    msg=(
-                        "We couldn’t match that email and password after several attempts. "
-                        "Create a PatternCraft.app account to get started."
-                    ),
+                    msg="We couldn’t match that email and password after several attempts. Create a PatternCraft.app account to get started.",
                 )
             )
         attempts_left = max(0, 3 - failures)
@@ -580,10 +512,12 @@ def logout():
 
 
 # ---------------------- SAMPLE PATTERN ZIP ----------------------
-
-
 @app.get("/sample-pattern.zip")
 def sample_pattern_zip():
+    """
+    Serve a sample quilt-style pattern ZIP with a grid and legend.
+    Uses a synthetic patchwork-style chart generated in code.
+    """
     w, h = 40, 40
     base = Image.new("RGB", (w, h), (245, 245, 245))
     draw = ImageDraw.Draw(base)
@@ -655,10 +589,7 @@ def sample_pattern_zip():
             "strands": strands,
             "waste_percent": waste_pct,
             "finished_size_in": [finished_w_in, finished_h_in],
-            "notes": (
-                "Sample quilt-style color grid generated by PatternCraft.app "
-                "with grid.png and legend.csv."
-            ),
+            "notes": "Sample quilt-style color grid generated by PatternCraft.app with grid.png and legend.csv.",
         }
         z.writestr("meta.json", json.dumps(meta, indent=2))
 
@@ -676,8 +607,6 @@ def sample_pattern_zip():
 
 
 # ---------------------- PATTERN GENERATOR (ACCOUNT + MEMBERSHIP GATED) ----------------------
-
-
 @app.post("/api/convert")
 def convert():
     email = session.get("user_email")
@@ -693,11 +622,15 @@ def convert():
     subscription = user.get("subscription", "free")
     credits = int(user.get("credits", 0) or 0)
     free_used = bool(user.get("free_used", False))
+    unlimited_until = parse_time(user.get("unlimited_until"))
+    now = now_utc()
+    has_unlimited = unlimited_until is not None and now <= unlimited_until
 
     mark_free_used = False
     consume_credit = False
 
-    if is_membership_active(user):
+    if subscription in ("unlimited_3m", "unlimited_year") and has_unlimited:
+        # Unlimited use while plan is active
         pass
     elif credits > 0:
         consume_credit = True
@@ -764,12 +697,8 @@ def convert():
 
             total_stitches = sum(counts.values()) or 1
             lines = ["hex,r,g,b,stitches,percent,skeins_est"]
-            for (r, g, b), c in sorted(
-                counts.items(), key=lambda kv: kv[1], reverse=True
-            ):
-                skeins = skeins_per_color(
-                    c, cloth_count, strands, waste_pct / 100.0
-                )
+            for (r, g, b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+                skeins = skeins_per_color(c, cloth_count, strands, waste_pct / 100.0)
                 lines.append(
                     f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total_stitches):.2f},{skeins:.2f}"
                 )
@@ -821,13 +750,11 @@ def convert():
         else:
             return jsonify({"error": "unknown_ptype"}), 400
 
-    if is_membership_active(user):
-        pass
-    else:
-        if consume_credit and credits > 0:
-            user["credits"] = max(0, credits - 1)
-        if mark_free_used:
-            user["free_used"] = True
+    if consume_credit and credits > 0:
+        user["credits"] = max(0, credits - 1)
+    if mark_free_used:
+        user["free_used"] = True
+    if consume_credit or mark_free_used:
         users[email] = user
         save_users(users)
 
@@ -840,8 +767,7 @@ def convert():
     )
 
 
-# ---------------------- INLINE HTML: HOMEPAGE ----------------------
-
+# ---------------------- INLINE HTML: TEMPLATES ----------------------
 HOMEPAGE_HTML = r"""
 <!doctype html>
 <html lang="en">
@@ -892,8 +818,8 @@ HOMEPAGE_HTML = r"""
       padding:20px;
     }
     .hero{
-      display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,2fr);
-      gap:20px;margin-bottom:28px;align-items:center;
+      display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,2.4fr);
+      gap:20px;margin-bottom:28px;align-items:stretch;
     }
     .hero-tagline{color:var(--muted);max-width:420px;}
     .muted{color:var(--muted);font-size:13px}
@@ -933,6 +859,67 @@ HOMEPAGE_HTML = r"""
       font-size:11px;padding:4px 8px;border-radius:999px;
       background:#e5edff;color:#1d4ed8;border:1px solid rgba(129,140,248,.5);
     }
+
+    /* PC.app movie + collage */
+    .video-shell{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      padding:18px;
+      background:linear-gradient(145deg,#fef3c7,#fce7f3,#e0f2fe);
+      border-radius:20px;
+      border:1px solid rgba(148,163,184,.35);
+      box-shadow:0 14px 35px rgba(15,23,42,.22);
+    }
+    .video-label{
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:.12em;
+      color:#6b21a8;
+      font-weight:700;
+    }
+    .video-grid{
+      display:grid;
+      grid-template-columns:3fr 2fr;
+      gap:10px;
+      align-items:stretch;
+    }
+    .video-main{
+      position:relative;
+      border-radius:16px;
+      overflow:hidden;
+      background:#0f172a url("/static/leaves.jpg") center/cover no-repeat;
+      box-shadow:0 10px 30px rgba(15,23,42,.35);
+    }
+    .video-main video{
+      width:100%;
+      height:100%;
+      display:block;
+      object-fit:cover;
+    }
+    .video-side{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .video-thumb{
+      flex:1;
+      border-radius:12px;
+      overflow:hidden;
+      box-shadow:0 6px 16px rgba(15,23,42,.25);
+      background:#0f172a;
+    }
+    .video-thumb img{
+      width:100%;
+      height:100%;
+      display:block;
+      object-fit:cover;
+    }
+    .video-caption{
+      font-size:12px;
+      color:#4b5563;
+    }
+
     .section-title{font-size:1.1rem;margin-bottom:6px}
     .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.2fr)}
     .file{
@@ -979,6 +966,8 @@ HOMEPAGE_HTML = r"""
     @media (max-width:860px){
       .hero{grid-template-columns:1fr}
       .make-layout{grid-template-columns:1fr}
+      .video-grid{grid-template-columns:1fr;grid-auto-rows:auto;}
+      .video-main{height:220px;}
     }
   </style>
 </head>
@@ -990,17 +979,7 @@ HOMEPAGE_HTML = r"""
     <div class="top-links">
       <a href="/pricing">Pricing</a>
       {% if user %}
-        · {{ user.email }}
-        {% if user.subscription in ['unlimited_3m','unlimited_year'] %}
-          · Plan: {{ user.subscription }}
-          {% if user.membership_expires %}
-            (until {{ user.membership_expires[:10] }})
-          {% endif %}
-        {% elif user.credits %}
-          · Credits: {{ user.credits }}
-        {% else %}
-          · Free plan
-        {% endif %}
+        · Signed in as {{ user.email }} ({{ user.subscription }} plan)
         · <a href="/logout">Sign out</a>
       {% else %}
         · <a href="/login">Log in</a> · <a href="/signup">Create account</a>
@@ -1044,14 +1023,32 @@ HOMEPAGE_HTML = r"""
       </div>
     </div>
 
-    <div class="card">
-      <h2 class="section-title">Why PatternCraft.app</h2>
-      <ul class="muted" style="padding-left:18px">
-        <li>Clean grids with bold 10×10 guides</li>
-        <li>Floss estimates per color for planning</li>
-        <li>Knitting charts that respect row proportions</li>
-        <li>Embroidery outputs ready for your workflow</li>
-      </ul>
+    <!-- PC.app movie + side images -->
+    <div class="video-shell">
+      <div class="video-label">PC.app — Picture → Pattern in ~15 seconds</div>
+      <div class="video-grid">
+        <div class="video-main">
+          <video autoplay muted loop playsinline poster="/static/leaves.jpg">
+            <source src="/static/pc_app.mp4" type="video/mp4">
+            Your browser doesn’t support HTML5 video.
+          </video>
+        </div>
+        <div class="video-side">
+          <div class="video-thumb">
+            <img src="/static/sample_quilt.jpg" alt="Quilt photo turned into a PatternCraft grid">
+          </div>
+          <div class="video-thumb">
+            <img src="/static/sample_knit.jpg" alt="Knitting chart preview from PatternCraft">
+          </div>
+          <div class="video-thumb">
+            <img src="/static/sample_cross.jpg" alt="Cross-stitch pattern close-up from PatternCraft">
+          </div>
+        </div>
+      </div>
+      <div class="video-caption">
+        See the whole flow: choose a plan, upload a photo, tweak stitch settings,
+        check out with Stripe, and download a full‑resolution pattern ZIP ready to print or stitch.
+      </div>
     </div>
   </div>
 
@@ -1104,7 +1101,10 @@ HOMEPAGE_HTML = r"""
                 <select id="stitch_style" name="stitch_style"></select>
               </label>
             </div>
-            <p class="controls-note">Defaults work well for most art. Adjust once you know your style.</p>
+            <p class="controls-note">
+              Choose the pattern type and a stitch style label you’ll recognize later.
+              We keep your palette consistent by locking to a color count you choose.
+            </p>
           </fieldset>
 
           <fieldset id="crossKnitBlock">
@@ -1122,6 +1122,10 @@ HOMEPAGE_HTML = r"""
             </div>
             <label><input type="checkbox" name="symbols" checked> Symbol overlay</label>
             <label style="margin-left:10px"><input type="checkbox" name="pdf" checked> Also export PDF</label>
+            <p class="controls-note">
+              Legend.csv includes hex + RGB codes, stitch counts, and skein estimates per color,
+              so you can map to your favorite floss brand.
+            </p>
           </fieldset>
 
           <fieldset id="embBlock" class="hidden">
@@ -1142,7 +1146,8 @@ HOMEPAGE_HTML = r"""
           <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <button class="pill" id="generateBtn" type="submit">Generate pattern ZIP</button>
             <span class="muted">
-              Your download includes grid.png, legend.csv, meta.json, and optional pattern.pdf or embroidery files.
+              Your download includes grid.png, legend.csv (with color codes and stitch counts),
+              meta.json (with stitch style and fabric info), and optional pattern.pdf or embroidery files.
             </span>
           </div>
         </form>
@@ -1220,8 +1225,6 @@ HOMEPAGE_HTML = r"""
 </body>
 </html>
 """
-
-# ---------------------- INLINE HTML: SIGNUP / LOGIN / PRICING / SUCCESS ----------------------
 
 SIGNUP_HTML = r"""
 <!doctype html>
@@ -1429,6 +1432,21 @@ footer{border-top:1px solid var(--line);margin-top:24px}
   font-weight:700;
   margin-bottom:8px;
 }
+.plan-guide{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:14px;
+  margin-top:18px;
+}
+.plan-card{
+  background:#fff;
+  border-radius:var(--radius);
+  border:1px dashed var(--line);
+  padding:14px;
+}
+.plan-card h3{margin:0 0 4px;font-size:15px}
+.plan-card p{margin:3px 0;font-size:13px;color:var(--muted)}
+.plan-card ul{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)}
 </style>
 
 <header>
@@ -1458,9 +1476,9 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       <p class="small">Single pattern and legend. Use whenever.</p>
       <ul class="list">
         <li>1 professional pattern conversion</li>
-        <li>Detailed legend included</li>
-        <li>High-resolution grid output</li>
-        <li>Use your pattern whenever you like</li>
+        <li>Clean grid with symbols and 10×10 guides</li>
+        <li>Legend with color hex & RGB codes, counts, and skein estimates</li>
+        <li>PNG, CSV, and optional PDF export</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="single">
@@ -1471,14 +1489,14 @@ footer{border-top:1px solid var(--line);margin-top:24px}
 
     <!-- 10-Pattern Pack -->
     <div class="card">
-      <h3>10 Pattern Pack</h3>
+      <h3>10-Pattern Pack</h3>
       <div class="price">$60</div>
       <p class="small">Great for consistent hobby use.</p>
       <ul class="list">
         <li>10 pattern conversions</li>
         <li>Credits never expire</li>
-        <li>Includes all export formats</li>
-        <li>Premium palette options</li>
+        <li>Same exports as the Single plan on every pattern</li>
+        <li>Room to experiment with sizes and color counts</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="pack10">
@@ -1490,20 +1508,19 @@ footer{border-top:1px solid var(--line);margin-top:24px}
     <!-- 3-Month Unlimited -->
     <div class="card">
       <h3>3-Month Unlimited</h3>
-      <div class="price">$75 every 3 months</div>
-      <p class="small">Recurring charge of $75 every 3 months for unlimited patterns.</p>
+      <div class="price">$75 / every 3 months</div>
+      <p class="small">Recurring access billed every 3 months.</p>
       <ul class="list">
-        <li>Unlimited pattern conversions</li>
-        <li>Highest-quality output (4× resolution)</li>
-        <li>Advanced color tools</li>
-        <li>Priority processing</li>
-        <li>All export formats + templates</li>
+        <li>Unlimited pattern conversions while your plan is active</li>
+        <li>Use any stitch width up to the tool’s max</li>
+        <li>Fine-tune palette size and stitch style on every run</li>
+        <li>Full export bundle (PNG, CSV, meta, optional PDF/embroidery)</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="unlimited_3m">
-        <button class="btn ghost" type="submit">Start 3-Month Unlimited</button>
+        <button class="btn ghost" type="submit">Start 3‑month plan</button>
       </form>
-      <p class="small">Renews every 3 months until you cancel.</p>
+      <p class="small">Perfect for focused seasons of stitching.</p>
     </div>
 
     <!-- Annual Pro Unlimited -->
@@ -1512,11 +1529,10 @@ footer{border-top:1px solid var(--line);margin-top:24px}
       <div class="price">$99 / year</div>
       <p class="small">Unlimited patterns all year.</p>
       <ul class="list">
-        <li>Unlimited pattern conversions</li>
-        <li>4× resolution for large projects</li>
-        <li>Advanced color tools</li>
-        <li>Priority processing</li>
-        <li>All export formats + templates</li>
+        <li>Unlimited pattern conversions for 12 months</li>
+        <li>Ideal if you release patterns or stitch for clients</li>
+        <li>Great for large projects and frequent use</li>
+        <li>Same full export bundle on every pattern</li>
       </ul>
       <form method="POST" action="/checkout">
         <input type="hidden" name="plan" value="unlimited_year">
@@ -1529,29 +1545,87 @@ footer{border-top:1px solid var(--line);margin-top:24px}
 
 <section class="wrap" id="how">
   <h2>How PatternCraft.app works</h2>
-  <p class="small">From photo to stitch-ready pattern in three simple steps.</p>
+  <p class="small">From photo to stitch-ready pattern in five clear steps.</p>
   <div class="steps">
     <div class="step-card">
       <div class="step-num">1</div>
-      <h3>Upload your image</h3>
+      <h3>Pick a plan</h3>
       <p class="small">
-        Start with a photo, artwork, or logo. PatternCraft analyzes it for stitchable detail.
+        Start with your included free pattern. When you’re ready for more, choose
+        Single, 10‑Pack, 3‑Month Unlimited, or Pro Annual based on how often you stitch.
       </p>
     </div>
     <div class="step-card">
       <div class="step-num">2</div>
-      <h3>Choose size & colors</h3>
+      <h3>Upload your image</h3>
       <p class="small">
-        Set stitch width, cloth count, and palette size. Preview your grid with bold 10×10 guides.
+        Drop in a photo, illustration, or logo. PatternCraft prepares it for a
+        stitchable grid while keeping the overall look of your artwork.
       </p>
     </div>
     <div class="step-card">
       <div class="step-num">3</div>
+      <h3>Dial in pattern settings</h3>
+      <p class="small">
+        Choose pattern type (cross‑stitch, knitting, or embroidery), pick a stitch
+        style label, then set stitch width, cloth count, strands, waste %, and
+        maximum colors. The tool locks your art to a stable palette so colors stay
+        consistent between the grid and the legend.
+      </p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">4</div>
+      <h3>Check out with Stripe</h3>
+      <p class="small">
+        When you’ve used your included free pattern, we send you to a secure,
+        Stripe‑hosted checkout page. Your email is tied to your credits or
+        unlimited access so you can log in from any device.
+      </p>
+    </div>
+    <div class="step-card">
+      <div class="step-num">5</div>
       <h3>Download your pattern ZIP</h3>
       <p class="small">
-        Download a ZIP with grid.png, legend.csv, meta.json, and optional PDF or embroidery files,
-        ready to print or import into your workflow.
+        Every pattern includes grid.png, legend.csv (with hex + RGB color codes,
+        stitch counts, and skein estimates), meta.json (with stitch style, cloth
+        count, and size), and optional pattern.pdf or embroidery files. Print it,
+        load it into your pattern software, or take it straight to your hoop.
       </p>
+    </div>
+  </div>
+
+  <div class="plan-guide">
+    <div class="plan-card">
+      <h3>Single Pattern</h3>
+      <p>Best when you want to test PatternCraft.app on one special project.</p>
+      <ul>
+        <li>Tip: start around 120–160 stitches wide for most cross‑stitch pieces.</li>
+        <li>Tip: try 16–24 colors for a clean but detailed result.</li>
+      </ul>
+    </div>
+    <div class="plan-card">
+      <h3>10‑Pattern Pack</h3>
+      <p>Great if you regularly stitch gifts, SALs, or personal projects.</p>
+      <ul>
+        <li>Tip: use lower color counts for bold, graphic designs; higher counts for portraits.</li>
+        <li>Tip: keep notes on which cloth counts you like in the meta.json file.</li>
+      </ul>
+    </div>
+    <div class="plan-card">
+      <h3>3‑Month Unlimited</h3>
+      <p>Perfect for design sprints, seasonal releases, or intensive making periods.</p>
+      <ul>
+        <li>Tip: batch‑convert multiple color and size options for the same artwork.</li>
+        <li>Tip: use the stitch style label (“full”, “half”, “back”) to organize your series.</li>
+      </ul>
+    </div>
+    <div class="plan-card">
+      <h3>Pro Annual</h3>
+      <p>Made for pattern sellers and prolific stitchers who work all year.</p>
+      <ul>
+        <li>Tip: standardize on a few cloth counts and palette sizes so your catalog feels cohesive.</li>
+        <li>Tip: use legend.csv as your master color and yardage reference across patterns.</li>
+      </ul>
     </div>
   </div>
 </section>
@@ -1604,12 +1678,8 @@ SUCCESS_HTML = r"""
   <div class="wrap">
     <div class="card">
       <h1>Payment received</h1>
-      <p>Thank you{% if user %}, {{ user.email }}{% endif %}.</p>
-      {% if message %}
-        <p>{{ message }}</p>
-      {% else %}
-        <p>Your PatternCraft.app plan has been updated. You can start generating patterns right away.</p>
-      {% endif %}
+      <p>Thank you{% if user %}, {{ user.email }}{% endif %}. Your PatternCraft.app plan will be updated shortly.</p>
+      <p>You can go back to the tool and start generating patterns right away. If your account hasn’t updated yet, it will as soon as Stripe finishes processing your purchase.</p>
       <p style="margin-top:14px;">
         <a href="/">← Back to PatternCraft.app</a>
       </p>
