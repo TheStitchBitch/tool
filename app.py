@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import csv
 import io
 import json
 import math
 import os
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Tuple, List, Optional
 
 from flask import (
@@ -47,6 +48,7 @@ ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
 CELL_PX = 12
 MAX_DIM = 8000  # max width/height in pixels
+RETENTION_DAYS = 7  # rolling cache ~ 1 week
 
 
 # ---------------------- UTILS: USERS & PATTERN STORAGE ----------------------
@@ -88,6 +90,51 @@ def get_user_pattern_dir(email: str) -> str:
     d = os.path.join(PATTERNS_DIR, safe_email_key(email))
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def cleanup_old_patterns(email: str, user: dict) -> None:
+    """Delete pattern files and metadata older than RETENTION_DAYS."""
+    patterns = user.get("patterns") or []
+    if not patterns:
+        return
+    cutoff = datetime.utcnow() - timedelta(days=RETENTION_DAYS)
+    keep: List[dict] = []
+    user_dir = get_user_pattern_dir(email)
+
+    for p in patterns:
+        created_str = p.get("created_at")
+        if not created_str:
+            keep.append(p)
+            continue
+        try:
+            s = created_str
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            keep.append(p)
+            continue
+
+        if dt < cutoff:
+            pid = p.get("id")
+            if not pid:
+                continue
+            for name in [
+                f"{pid}.zip",
+                f"{pid}_grid.png",
+                f"{pid}_legend.csv",
+                f"{pid}_meta.json",
+            ]:
+                try:
+                    fp = os.path.join(user_dir, name)
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                except Exception:
+                    pass
+        else:
+            keep.append(p)
+
+    user["patterns"] = keep
 
 
 # ---------------------- IMAGE / PATTERN HELPERS ----------------------
@@ -340,10 +387,71 @@ def my_patterns() -> str:
         return redirect(
             url_for("login", msg="Log in to see patterns saved to your account.")
         )
-    patterns = user.get("patterns", [])
-    # newest first
+
+    email = user["email"]
+    users = load_users()
+    full_user = users.get(email, user)
+    cleanup_old_patterns(email, full_user)
+    users[email] = full_user
+    save_users(users)
+
+    patterns = full_user.get("patterns", [])
     patterns = sorted(patterns, key=lambda p: p.get("created_at", ""), reverse=True)
-    return render_template_string(PATTERNS_HTML, user=user, patterns=patterns)
+    return render_template_string(PATTERNS_HTML, user=full_user, patterns=patterns)
+
+
+@app.get("/patterns/<pattern_id>")
+def pattern_detail(pattern_id: str):
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    email = user["email"]
+    patterns = user.get("patterns", [])
+    pattern_entry = None
+    for p in patterns:
+        if p.get("id") == pattern_id:
+            pattern_entry = p
+            break
+    if not pattern_entry:
+        return make_response("Not found", 404)
+
+    user_dir = get_user_pattern_dir(email)
+    legend_path = os.path.join(user_dir, f"{pattern_id}_legend.csv")
+    header: List[str] = []
+    rows: List[List[str]] = []
+    if os.path.exists(legend_path):
+        try:
+            with open(legend_path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for i, row in enumerate(reader):
+                    if i == 0:
+                        header = row
+                    else:
+                        rows.append(row)
+        except Exception:
+            header = []
+            rows = []
+
+    meta_path = os.path.join(user_dir, f"{pattern_id}_meta.json")
+    meta: dict = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            meta = {}
+
+    grid_url = url_for("pattern_grid", pattern_id=pattern_id)
+    return render_template_string(
+        PATTERN_DETAIL_HTML,
+        user=user,
+        pattern=pattern_entry,
+        header=header,
+        rows=rows,
+        meta=meta,
+        grid_url=grid_url,
+    )
 
 
 @app.get("/patterns/<pattern_id>/grid")
@@ -441,7 +549,7 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "free_used": False,  # 1 full pattern per account while in beta
+        "free_used": False,
         "patterns": [],
     }
     save_users(users)
@@ -537,15 +645,8 @@ def convert():
             url_for("signup", msg="Create your free PatternCraft.app account to continue.")
         )
 
-    patterns = user.get("patterns", [])
-    if len(patterns) >= 1:
-        # One full pattern per account while in beta
-        return redirect(
-            url_for(
-                "index",
-                err="Beta limit: one full pattern per account for now. Your existing patterns are saved under My Patterns.",
-            )
-        )
+    # Clean up old patterns for this user (rolling 1‑week cache)
+    cleanup_old_patterns(email, user)
 
     file = request.files.get("file")
     if not file:
@@ -659,7 +760,7 @@ def convert():
             if pdf_bytes:
                 z.writestr("pattern.pdf", pdf_bytes)
 
-            # Persist for "My Patterns"
+            # Persist for "My patterns"
             with open(grid_path, "wb") as f:
                 f.write(grid_bytes)
             with open(legend_path, "w", encoding="utf-8") as f:
@@ -693,7 +794,7 @@ def convert():
     with open(zip_path, "wb") as f:
         f.write(zip_bytes)
 
-    # Update user record: mark free_used and attach pattern metadata
+    # Update user record: append pattern metadata
     pattern_entry = {
         "id": pattern_id,
         "created_at": datetime.utcnow().isoformat() + "Z",
@@ -812,7 +913,7 @@ HOMEPAGE_HTML = r"""
     }
     .hero-tagline{color:var(--muted);max-width:460px;font-size:14px;}
     .hero-cta-row{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;}
-    .hero-note{font-size:12px;color:#4B5563;margin-top:10px;}
+    .hero-note{font-size:12px;color:#4B5563;margin-top:10px;max-width:480px;}
     .badge-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;}
     .badge{
       font-size:11px;padding:5px 10px;border-radius:999px;
@@ -955,10 +1056,7 @@ HOMEPAGE_HTML = r"""
       </p>
       <div class="hero-cta-row">
         {% if user %}
-          <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
-            Open the pattern tool
-          </button>
-          <a class="pill secondary" href="/patterns">View my patterns</a>
+          <a class="pill" href="/patterns">View my patterns</a>
         {% else %}
           <a class="pill" href="/signup">
             Create Free Account
@@ -969,12 +1067,15 @@ HOMEPAGE_HTML = r"""
         {% endif %}
       </div>
       <div class="hero-note">
-        Every account includes <strong>one full pattern on us</strong>, plus an optional
-        monthly email with ideas and tips for new designs.
+        {% if user %}
+          Patterns you generate are saved under <strong>My patterns</strong> for at least 7 days so you can come back to view, print, or download them again.
+        {% else %}
+          Create a free account to generate full‑size patterns as often as you like. Patterns you make are saved under <strong>My patterns</strong> for at least 7 days.
+        {% endif %}
       </div>
       <div class="badge-row">
-        <span class="badge">One free pattern per account (beta)</span>
-        <span class="badge badge-ghost">Patterns saved to your account</span>
+        <span class="badge">Free account · patterns saved to your profile</span>
+        <span class="badge badge-ghost">Patterns saved under “My patterns”</span>
       </div>
       {% if error %}
         <div class="error-banner" style="max-width:460px;">{{ error }}</div>
@@ -996,6 +1097,7 @@ HOMEPAGE_HTML = r"""
       <div class="hero-right-divider"></div>
       <div class="hero-right-foot">
         Your patterns are saved to your account so you can return later to view, print, or download again.
+        We keep a rolling cache of roughly one week to keep the tool fast.
       </div>
     </div>
   </div>
@@ -1005,8 +1107,8 @@ HOMEPAGE_HTML = r"""
       <div>
         <h2 class="section-title">Make a pattern</h2>
         <p class="section-sub">
-          Create a free account or log in to generate a pattern. While we’re in beta,
-          every account can create one full pattern that stays saved under <strong>My patterns</strong>.
+          Create a free account or log in to generate patterns. Once signed in, you can create full‑size
+          patterns and find them later under <strong>My patterns</strong> for at least 7 days.
         </p>
 
         <form method="POST" action="/api/convert" enctype="multipart/form-data">
@@ -1117,7 +1219,7 @@ HOMEPAGE_HTML = r"""
             <li>You get a pattern image, legend with codes, and a ZIP you can print or archive.</li>
           </ul>
           <p class="controls-note">
-            While we’re in beta, accounts are limited to one full pattern each so we can keep things fast and reliable.
+            Patterns are cached for at least 7 days. Older patterns may roll off automatically so the tool stays fast.
           </p>
         </div>
       </div>
@@ -1206,7 +1308,7 @@ HOMEPAGE_HTML = r"""
 </html>
 """
 
-# ---------------------- INLINE HTML: SIGNUP / LOGIN / PATTERNS ----------------------
+# ---------------------- INLINE HTML: SIGNUP / LOGIN / PATTERNS / DETAIL ----------------------
 
 SIGNUP_HTML = r"""
 <!doctype html>
@@ -1261,11 +1363,11 @@ SIGNUP_HTML = r"""
 <body>
 <div class="wrap">
   <div class="card">
-    <div class="free-chip"><span class="dot"></span> Free account · one pattern included</div>
+    <div class="free-chip"><span class="dot"></span> Free account · patterns saved 7 days</div>
     <h1>Create your free PatternCraft.app account</h1>
     <p class="muted">
-      Sign up once and your patterns stay attached to your email. Every new account includes
-      <strong>one full pattern</strong> you can generate, save, and return to under <em>My patterns</em>.
+      Sign up once and your patterns stay attached to your email. Free accounts can
+      generate full‑size patterns and see them under <em>My patterns</em> for at least 7 days.
     </p>
     <ul>
       <li>Use an email you actually check — we’ll send your account notices there.</li>
@@ -1370,7 +1472,7 @@ LOGIN_HTML = r"""
     {% endif %}
     <div class="alt">
       New to PatternCraft.app? <a href="/signup">Create a free account</a> —
-      includes one free pattern and access to monthly pattern ideas.
+      includes pattern saving and monthly pattern ideas.
     </div>
   </div>
 </div>
@@ -1477,8 +1579,8 @@ PATTERNS_HTML = r"""
 
   <h1>My patterns</h1>
   <p class="muted">
-    These are the patterns you’ve generated with PatternCraft.app. Open a grid to print, view its legend,
-    or download the original ZIP again.
+    These are patterns you’ve generated recently with PatternCraft.app. We keep a rolling cache of roughly
+    one week; older patterns may drop off automatically.
   </p>
 
   {% if not patterns %}
@@ -1501,12 +1603,167 @@ PATTERNS_HTML = r"""
           </div>
           <div class="actions">
             <a class="pill-small" href="/patterns/{{ p.id }}/download">Download ZIP</a>
-            <a class="pill-small secondary" href="/patterns/{{ p.id }}/legend" target="_blank">View legend</a>
+            <a class="pill-small secondary" href="/patterns/{{ p.id }}">View details</a>
           </div>
         </div>
       {% endfor %}
     </div>
   {% endif %}
+</div>
+</body>
+</html>
+"""
+
+PATTERN_DETAIL_HTML = r"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pattern details — PatternCraft.app</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{margin:0;background:#FFFDF2;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#1F2933;}
+    .wrap{max-width:1100px;margin:0 auto;padding:26px 18px 46px;}
+    .topbar{
+      display:flex;align-items:center;justify-content:space-between;
+      margin-bottom:18px;
+    }
+    .brand{
+      display:flex;align-items:center;gap:8px;
+      font-weight:900;font-size:20px;letter-spacing:.05em;text-transform:uppercase;
+    }
+    .brand-mark{
+      width:26px;height:26px;border-radius:9px;
+      background:linear-gradient(135deg,#FACC15,#F97316);
+      display:flex;align-items:center;justify-content:center;
+      font-size:14px;font-weight:800;color:#1F2933;
+    }
+    .top-links{font-size:13px;color:#4B5563;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+    a{color:#C97700;text-decoration:none;}
+    a:hover{text-decoration:underline;}
+    h1{margin:0 0 6px;font-size:1.5rem;}
+    .muted{font-size:13px;color:#6B7280;margin:0 0 14px;}
+
+    .layout{
+      display:grid;
+      grid-template-columns:minmax(0,1.1fr) minmax(260px,1fr);
+      gap:18px;
+    }
+    .card{
+      background:#FFFFFF;border-radius:16px;border:1px solid #F4E5A9;
+      padding:14px 14px 16px;
+      box-shadow:0 10px 26px rgba(15,23,42,.12);
+    }
+    .preview{
+      border-radius:12px;border:1px solid #E5E7EB;background:#F9FAFB;
+      max-height:420px;overflow:hidden;display:flex;align-items:center;justify-content:center;
+    }
+    .preview img{width:100%;height:auto;object-fit:contain;display:block;}
+    .meta-block{font-size:12px;color:#6B7280;margin-top:8px;}
+    .meta-block strong{color:#374151;}
+
+    table{
+      width:100%;border-collapse:collapse;font-size:12px;
+    }
+    th,td{
+      border-bottom:1px solid #F3F4F6;
+      padding:6px 6px;text-align:left;
+      white-space:nowrap;
+    }
+    th{background:#FFFBEB;font-weight:600;color:#92400E;}
+    tbody tr:nth-child(even){background:#F9FAFB;}
+    .legend-wrap{
+      max-height:360px;overflow:auto;border-radius:12px;border:1px solid #F3F4F6;
+      background:#FFFFFF;
+    }
+    .pill-small{
+      display:inline-flex;align-items:center;justify-content:center;
+      padding:7px 14px;border-radius:999px;border:none;
+      font-size:12px;font-weight:600;cursor:pointer;
+      background:#FACC15;color:#1F2933;
+      margin-right:8px;margin-top:8px;
+    }
+    .pill-small.secondary{
+      background:#FFFFFF;border:1px solid #E5E7EB;color:#111827;
+    }
+    .pill-small:hover{filter:brightness(0.97);}
+    .empty{
+      font-size:12px;color:#6B7280;margin-top:4px;
+    }
+    @media (max-width:880px){
+      .layout{grid-template-columns:1fr;}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-mark">PC</div>
+      <div>PatternCraft.app</div>
+    </div>
+    <div class="top-links">
+      <span>Signed in as {{ user.email }}</span>
+      · <a href="/patterns">Back to My patterns</a>
+      · <a href="/">Back to tool</a>
+      · <a href="/logout">Sign out</a>
+    </div>
+  </div>
+
+  <h1>{{ pattern.title or "Pattern" }}</h1>
+  <p class="muted">
+    Type: {{ pattern.ptype|upper }} · Created {{ pattern.created_at }}
+  </p>
+
+  <div class="layout">
+    <div class="card">
+      <div class="preview">
+        <img src="{{ grid_url }}" alt="Pattern grid preview">
+      </div>
+      <div class="meta-block">
+        {% if meta %}
+          <div><strong>Size:</strong> {{ meta.stitches_w }} × {{ meta.stitches_h }} stitches</div>
+          <div><strong>Colors:</strong> {{ meta.colors }}</div>
+          <div><strong>Fabric:</strong> {{ meta.cloth_count }} ct · {{ meta.strands }} strands</div>
+          <div><strong>Approx. finished size:</strong> {{ meta.finished_size_in[0] }}″ × {{ meta.finished_size_in[1] }}″</div>
+        {% else %}
+          Pattern metadata is not available for this file.
+        {% endif %}
+      </div>
+      <div>
+        <a class="pill-small" href="/patterns/{{ pattern.id }}/download">Download ZIP</a>
+        <a class="pill-small secondary" href="/patterns/{{ pattern.id }}/legend" target="_blank">Open legend as CSV</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 8px;font-size:1rem;">Color legend</h2>
+      {% if header and rows %}
+        <div class="legend-wrap">
+          <table>
+            <thead>
+              <tr>
+                {% for h in header %}
+                  <th>{{ h }}</th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in rows %}
+                <tr>
+                  {% for c in r %}
+                    <td>{{ c }}</td>
+                  {% endfor %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">Legend not available for this pattern.</p>
+      {% endif %}
+    </div>
+  </div>
 </div>
 </body>
 </html>
