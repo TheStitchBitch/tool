@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import base64
-import datetime as dt
 import io
 import json
 import math
 import os
 import uuid
 import zipfile
+from datetime import datetime
 from typing import Dict, Tuple, List, Optional
 
 from flask import (
@@ -24,8 +23,6 @@ from flask import (
 from PIL import Image, ImageDraw, ImageFont
 from werkzeug.security import generate_password_hash, check_password_hash
 
-import stripe
-
 # Optional embroidery support
 try:
     from pyembroidery import EmbPattern, write_dst, write_pes  # type: ignore
@@ -34,50 +31,36 @@ try:
 except Exception:
     HAS_PYEMB = False
 
-# ---------------------- APP & STORAGE SETUP ----------------------
+# ---------------------- APP & STORAGE PATHS ----------------------
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
 BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-PATTERN_DIR = os.path.join(DATA_DIR, "patterns")
-PREVIEW_DIR = os.path.join(DATA_DIR, "previews")
-os.makedirs(PATTERN_DIR, exist_ok=True)
-os.makedirs(PREVIEW_DIR, exist_ok=True)
+USERS_FILE = os.path.join(BASE_DIR, "users.json")
+PATTERNS_DIR = os.path.join(BASE_DIR, "user_patterns")
+os.makedirs(PATTERNS_DIR, exist_ok=True)
 
-USERS_FILE = os.path.join(DATA_DIR, "users.json")
-
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
+# Config
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/svg+xml", "application/dxf"}
 
 CELL_PX = 12
-MAX_DIM = 8000
+MAX_DIM = 8000  # max width/height in pixels
 
-# ---------------------- STRIPE CONFIG ----------------------------
 
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
-
-# Live price IDs from your latest Stripe export (prices (5).csv)
-STRIPE_PRICE_SINGLE = "price_1SXNyWCINTImVye2jayzoKKj"   # Single Pattern – $25
-STRIPE_PRICE_PACK10 = "price_1SXNyRCINTImVye2m433u7pL"   # 10 Pattern Pack – $60
-STRIPE_PRICE_3MO = "price_1SXTFUCINTImVye2JwOxUN55"      # 3-Month Unlimited – billed every 3 months
-STRIPE_PRICE_ANNUAL = "price_1SXNyNCINTImVye2rcxl5LsO"   # Annual Unlimited – $99/year
-
-# ---------------------- USER STORAGE -----------------------------
+# ---------------------- UTILS: USERS & PATTERN STORAGE ----------------------
 
 
 def load_users() -> Dict[str, dict]:
-    if not os.path.exists(USERS_FILE):
-        return {}
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            return data
+            if isinstance(data, dict):
+                return data
+    except FileNotFoundError:
+        return {}
     except Exception:
-        # If file is corrupted, fail safe and start empty (prevents crashes)
         return {}
     return {}
 
@@ -94,40 +77,20 @@ def get_current_user() -> Optional[dict]:
     if not email:
         return None
     users = load_users()
-    user = users.get(email)
-    if not user:
-        return None
-    # Ensure patterns list exists
-    user.setdefault("patterns", [])
-    return user
+    return users.get(email)
 
 
-def has_unlimited_access(user: dict) -> bool:
-    """Check if user currently has an active unlimited plan."""
-    now = dt.datetime.utcnow()
-    sub = user.get("subscription", "free")
-    if sub == "unlimited_3m":
-        exp = user.get("unlimited_3m_expires_at")
-        if not exp:
-            return False
-        try:
-            exp_dt = dt.datetime.fromisoformat(exp.replace("Z", "+00:00"))
-        except Exception:
-            return False
-        return exp_dt > now
-    if sub == "annual":
-        exp = user.get("annual_expires_at")
-        if not exp:
-            return False
-        try:
-            exp_dt = dt.datetime.fromisoformat(exp.replace("Z", "+00:00"))
-        except Exception:
-            return False
-        return exp_dt > now
-    return False
+def safe_email_key(email: str) -> str:
+    return email.replace("@", "_at_").replace(".", "_dot_")
 
 
-# ---------------------- IMAGE / PATTERN HELPERS ------------------
+def get_user_pattern_dir(email: str) -> str:
+    d = os.path.join(PATTERNS_DIR, safe_email_key(email))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# ---------------------- IMAGE / PATTERN HELPERS ----------------------
 
 
 def clamp(v: int, lo: int, hi: int) -> int:
@@ -181,12 +144,12 @@ def luminance(rgb: Tuple[int, int, int]) -> float:
 
 
 def draw_grid(base: Image.Image, cell_px: int) -> Image.Image:
-    """Scale each stitch to a cell and overlay a clean 10×10 grid (no watermark/fade)."""
+    """Scale each stitch to a cell and overlay a 10×10 grid (no watermark)."""
     sx, sy = base.size
     out = base.resize((sx * cell_px, sy * cell_px), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(out)
-    thin = (0, 0, 0, 60)
-    bold = (0, 0, 0, 160)
+    thin = (0, 0, 0, 70)
+    bold = (0, 0, 0, 170)
     for x in range(sx + 1):
         draw.line(
             [(x * cell_px, 0), (x * cell_px, sy * cell_px)],
@@ -211,12 +174,11 @@ def assign_symbols(colors: List[Tuple[int, int, int]]) -> Dict[Tuple[int, int, i
 def draw_symbols_on_grid(
     base: Image.Image, cell_px: int, sym_map: Dict[Tuple[int, int, int], str]
 ) -> Image.Image:
-    """Overlay symbol per stitch, then clean grid."""
+    """Overlay symbol per stitch, then grid (no fade / blur)."""
     sx, sy = base.size
     out = base.resize((sx * cell_px, sy * cell_px), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(out)
     font = ImageFont.load_default()
-
     for y in range(sy):
         for x in range(sx):
             rgb = base.getpixel((x, y))
@@ -229,9 +191,8 @@ def draw_symbols_on_grid(
                 fill=fill,
                 anchor="mm",
             )
-
-    thin = (0, 0, 0, 60)
-    bold = (0, 0, 0, 160)
+    thin = (0, 0, 0, 70)
+    bold = (0, 0, 0, 170)
     for x in range(sx + 1):
         draw.line(
             [(x * cell_px, 0), (x * cell_px, sy * cell_px)],
@@ -248,13 +209,14 @@ def draw_symbols_on_grid(
 
 
 def skeins_per_color(stitches: int, cloth_count: int, strands: int, waste: float) -> float:
-    """Rough DMC skein estimate."""
     per_stitch_cm = 2 * math.sqrt(2) * (2.54 / cloth_count) * (1 + waste)
     skein_cm = (800 * 6) / strands
     return (stitches * per_stitch_cm) / skein_cm
 
 
-def knit_aspect_resize(img: Image.Image, stitches_w: int, row_aspect: float = 0.8) -> Image.Image:
+def knit_aspect_resize(
+    img: Image.Image, stitches_w: int, row_aspect: float = 0.8
+) -> Image.Image:
     """Knitting charts: visually shorter rows for preview."""
     resized = resize_for_stitch_width(img, stitches_w)
     w, h = resized.size
@@ -312,7 +274,8 @@ def write_embroidery_outputs(paths: List[Tuple[int, int]], scale: float = 1.0) -
     return out
 
 
-# ---------------------- BASIC ROUTES -----------------------------
+# ---------------------- BASIC ROUTES & ERRORS ----------------------
+
 
 @app.get("/health")
 def health() -> dict:
@@ -324,131 +287,121 @@ def too_large(_e):
     return jsonify({"error": "file_too_large", "limit_mb": 25}), 413
 
 
-@app.get("/favicon.ico")
-def favicon():
-    """Generate a simple 'PC' emblem favicon on first request."""
-    path = os.path.join(DATA_DIR, "favicon.ico")
-    if not os.path.exists(path):
-        img = Image.new("RGBA", (64, 64), (255, 249, 230, 255))
-        draw = ImageDraw.Draw(img)
-        draw.ellipse((8, 8, 56, 56), fill=(245, 158, 11, 255))
-        try:
-            font = ImageFont.truetype("arial.ttf", 30)
-        except Exception:
-            font = ImageFont.load_default()
-        w, h = draw.textsize("PC", font=font)
-        draw.text(((64 - w) / 2, (64 - h) / 2 - 2), "PC", font=font, fill=(255, 255, 255, 255))
-        img.save(path, format="ICO")
-    return send_file(path, mimetype="image/x-icon")
+ERROR_HTML = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Something went wrong — PatternCraft.app</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{margin:0;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;background:#FFFDF2;color:#1F2933;}
+    .wrap{max-width:520px;margin:0 auto;padding:40px 16px;}
+    .card{background:#fff;border-radius:16px;border:1px solid #F4E5A9;box-shadow:0 12px 30px rgba(15,23,42,.12);padding:22px;}
+    h1{margin:0 0 8px;font-size:1.7rem;}
+    p{margin:6px 0;font-size:14px;color:#4B5563;}
+    a{color:#C97700;text-decoration:none;font-weight:600;}
+    a:hover{text-decoration:underline;}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>We hit a snag</h1>
+    <p>Something went wrong while processing your request.</p>
+    <p>You can <a href="/">go back to PatternCraft.app</a> and try again.</p>
+  </div>
+</div>
+</body>
+</html>
+"""
+
+
+@app.errorhandler(Exception)
+def on_error(e):
+    app.logger.exception("Unhandled error: %s", e)
+    return make_response(render_template_string(ERROR_HTML), 500)
+
+
+# ---------------------- MAIN PAGES ----------------------
 
 
 @app.get("/")
 def index() -> str:
     user = get_current_user()
-    return render_template_string(HOMEPAGE_HTML, user=user)
+    err = request.args.get("err", "")
+    return render_template_string(HOMEPAGE_HTML, user=user, error=err)
 
 
-@app.get("/pricing")
-def pricing() -> str:
+@app.get("/patterns")
+def my_patterns() -> str:
     user = get_current_user()
-    reason = request.args.get("reason", "")
-    message = ""
-    if reason == "used_free":
-        message = "You’ve already used your free PatternCraft.app pattern. Choose a plan to keep creating."
-    elif reason == "no_credits":
-        message = "You’ve used your available credits on this account. Pick a pack or unlimited plan to continue."
-    elif reason == "checkout_error":
-        message = "We couldn’t start checkout. Please try again or contact support."
-    return render_template_string(PRICING_HTML, user=user, message=message)
-
-
-# ---------------------- CHECKOUT + SUCCESS ----------------------
-
-@app.post("/checkout")
-def create_checkout():
-    """Create a Stripe Checkout Session for the selected plan."""
-    email = session.get("user_email")
-    if not email:
-        return redirect(url_for("login", msg="Log in or create an account before purchasing a plan."))
-
-    plan = (request.form.get("plan") or "").strip()
-
-    if plan == "single":
-        price_id = STRIPE_PRICE_SINGLE
-        mode = "payment"
-    elif plan == "pack10":
-        price_id = STRIPE_PRICE_PACK10
-        mode = "payment"
-    elif plan == "unlimited_3m":
-        price_id = STRIPE_PRICE_3MO
-        mode = "subscription"
-    elif plan == "annual":
-        price_id = STRIPE_PRICE_ANNUAL
-        mode = "subscription"
-    else:
-        return redirect(url_for("pricing"))
-
-    try:
-        checkout_session = stripe.checkout.Session.create(
-            mode=mode,
-            line_items=[{"price": price_id, "quantity": 1}],
-            customer_email=email,
-            client_reference_id=email,
-            success_url=url_for("success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=url_for("pricing", _external=True),
+    if not user:
+        return redirect(
+            url_for("login", msg="Log in to see patterns saved to your account.")
         )
-    except Exception:
-        return redirect(url_for("pricing", reason="checkout_error"))
+    patterns = user.get("patterns", [])
+    # newest first
+    patterns = sorted(patterns, key=lambda p: p.get("created_at", ""), reverse=True)
+    return render_template_string(PATTERNS_HTML, user=user, patterns=patterns)
 
-    return redirect(checkout_session.url)
 
-
-@app.get("/success")
-def success():
-    """Stripe success page; update membership based on the Checkout Session."""
+@app.get("/patterns/<pattern_id>/grid")
+def pattern_grid(pattern_id: str):
     user = get_current_user()
-    session_id = request.args.get("session_id")
-
-    if session_id and user:
-        try:
-            cs = stripe.checkout.Session.retrieve(session_id, expand=["line_items", "customer"])
-            email = (
-                cs.get("customer_details", {}).get("email")
-                or user.get("email")
-            )
-            price_id = None
-            if cs.get("line_items") and cs["line_items"]["data"]:
-                price_id = cs["line_items"]["data"][0]["price"]["id"]
-
-            users = load_users()
-            u = users.get(email, user)
-            now = dt.datetime.utcnow()
-
-            if price_id == STRIPE_PRICE_SINGLE:
-                u["subscription"] = "single"
-                u["credits"] = int(u.get("credits", 0) or 0) + 1
-            elif price_id == STRIPE_PRICE_PACK10:
-                u["subscription"] = "pack10"
-                u["credits"] = int(u.get("credits", 0) or 0) + 10
-            elif price_id == STRIPE_PRICE_3MO:
-                u["subscription"] = "unlimited_3m"
-                expires = now + dt.timedelta(days=90)
-                u["unlimited_3m_expires_at"] = expires.isoformat() + "Z"
-            elif price_id == STRIPE_PRICE_ANNUAL:
-                u["subscription"] = "annual"
-                expires = now + dt.timedelta(days=365)
-                u["annual_expires_at"] = expires.isoformat() + "Z"
-
-            u.setdefault("patterns", [])
-            users[email] = u
-            save_users(users)
-        except Exception:
-            pass
-
-    return render_template_string(SUCCESS_HTML, user=user)
+    if not user:
+        return redirect(url_for("login"))
+    email = user["email"]
+    for p in user.get("patterns", []):
+        if p.get("id") == pattern_id:
+            user_dir = get_user_pattern_dir(email)
+            grid_path = os.path.join(user_dir, f"{pattern_id}_grid.png")
+            if os.path.exists(grid_path):
+                return send_file(grid_path, mimetype="image/png")
+    return make_response("Not found", 404)
 
 
-# ---------------------- SIGNUP / LOGIN --------------------------
+@app.get("/patterns/<pattern_id>/legend")
+def pattern_legend(pattern_id: str):
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+    email = user["email"]
+    for p in user.get("patterns", []):
+        if p.get("id") == pattern_id:
+            user_dir = get_user_pattern_dir(email)
+            legend_path = os.path.join(user_dir, f"{pattern_id}_legend.csv")
+            if os.path.exists(legend_path):
+                with open(legend_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                return make_response(
+                    text, 200, {"Content-Type": "text/plain; charset=utf-8"}
+                )
+    return make_response("Not found", 404)
+
+
+@app.get("/patterns/<pattern_id>/download")
+def pattern_download(pattern_id: str):
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+    email = user["email"]
+    for p in user.get("patterns", []):
+        if p.get("id") == pattern_id:
+            user_dir = get_user_pattern_dir(email)
+            zip_path = os.path.join(user_dir, f"{pattern_id}.zip")
+            if os.path.exists(zip_path):
+                return send_file(
+                    zip_path,
+                    mimetype="application/zip",
+                    as_attachment=True,
+                    download_name=f"patterncraft_{pattern_id}.zip",
+                )
+    return make_response("Not found", 404)
+
+
+# ---------------------- SIGNUP / LOGIN ----------------------
+
 
 @app.get("/signup")
 def signup() -> str:
@@ -488,11 +441,8 @@ def signup_post():
     users[email] = {
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "free",  # free / single / pack10 / unlimited_3m / annual
-        "free_used": False,
-        "credits": 0,
+        "free_used": False,  # 1 full pattern per account while in beta
         "patterns": [],
-        "created_at": dt.datetime.utcnow().isoformat() + "Z",
     }
     save_users(users)
     session["user_email"] = email
@@ -541,7 +491,7 @@ def login_post():
             return redirect(
                 url_for(
                     "signup",
-                    msg="We couldn’t match that email and password after several attempts. Create a PatternCraft.app account to get started (includes one free pattern).",
+                    msg="We couldn’t match that email and password after several attempts. Create a free PatternCraft.app account to get started.",
                 )
             )
         attempts_left = max(0, 3 - failures)
@@ -564,128 +514,38 @@ def logout():
     return redirect(url_for("index"))
 
 
-# ---------------------- SAMPLE PATTERN ZIP -----------------------
+# ---------------------- PATTERN GENERATOR ----------------------
 
-@app.get("/sample-pattern.zip")
-def sample_pattern_zip():
-    """Serve a small sample quilt-style pattern ZIP with a grid and legend."""
-    w, h = 40, 40
-    base = Image.new("RGB", (w, h), (245, 245, 245))
-    draw = ImageDraw.Draw(base)
-    colors = [
-        (239, 68, 68),
-        (249, 115, 22),
-        (234, 179, 8),
-        (34, 197, 94),
-        (59, 130, 246),
-    ]
-    patch = 8
-    for py in range(0, h, patch):
-        for px in range(0, w, patch):
-            block_idx = (px // patch + py // patch) % len(colors)
-            base_color = colors[block_idx]
-            alt_color = colors[(block_idx + 2) % len(colors)]
-            style = (px // patch + 2 * (py // patch)) % 3
-
-            if style == 0:
-                draw.rectangle((px, py, px + patch - 1, py + patch - 1), fill=base_color)
-            elif style == 1:
-                for y in range(patch):
-                    for x in range(patch):
-                        if x >= y:
-                            draw.point((px + x, py + y), fill=base_color)
-                        else:
-                            draw.point((px + x, py + y), fill=alt_color)
-            else:
-                for y in range(patch):
-                    color = base_color if y % 2 == 0 else alt_color
-                    draw.line((px, py + y, px + patch - 1, py + y), fill=color)
-
-    max_colors = len(colors)
-    quant = quantize(base, max_colors)
-    counts = palette_counts(quant)
-    sx, sy = quant.size
-
-    cloth_count = 10
-    strands = 2
-    waste_pct = 20
-    finished_w_in = round(sx / float(cloth_count), 2)
-    finished_h_in = round(sy / float(cloth_count), 2)
-
-    grid_img = draw_grid(quant, cell_px=CELL_PX)
-    pal = sorted(counts.keys(), key=lambda c: counts[c], reverse=True)
-    sym_map = assign_symbols(pal)
-    sym_img = draw_symbols_on_grid(quant, cell_px=CELL_PX, sym_map=sym_map)
-
-    out_zip = io.BytesIO()
-    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
-        total_stitches = sum(counts.values()) or 1
-        lines = ["hex,r,g,b,stitches,percent,skeins_est"]
-        for (r, g, b), c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
-            skeins = skeins_per_color(c, cloth_count, strands, waste_pct / 100.0)
-            lines.append(
-                f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total_stitches):.2f},{skeins:.2f}"
-            )
-        z.writestr("legend.csv", "\n".join(lines))
-
-        meta = {
-            "type": "quilt_sample",
-            "stitch_style": "patchwork",
-            "stitches_w": sx,
-            "stitches_h": sy,
-            "colors": len(counts),
-            "cloth_count": cloth_count,
-            "strands": strands,
-            "waste_percent": waste_pct,
-            "finished_size_in": [finished_w_in, finished_h_in],
-            "notes": "Sample quilt-style color grid generated by PatternCraft.app.",
-        }
-        z.writestr("meta.json", json.dumps(meta, indent=2))
-
-        buf_png = io.BytesIO()
-        sym_img.save(buf_png, format="PNG")
-        z.writestr("grid.png", buf_png.getvalue())
-
-    out_zip.seek(0)
-    return send_file(
-        out_zip,
-        mimetype="application/zip",
-        as_attachment=True,
-        download_name="patterncraft_sample_quilt.zip",
-    )
-
-
-# ---------------------- PATTERN GENERATOR ------------------------
 
 @app.post("/api/convert")
 def convert():
-    # Require account
+    # Require an account
     email = session.get("user_email")
     if not email:
-        return redirect(url_for("login", msg="Log in to generate patterns (every new account includes one free pattern)."))
+        return redirect(
+            url_for(
+                "login",
+                msg="Create a free account to upload your first PatternCraft.app pattern.",
+            )
+        )
 
     users = load_users()
     user = users.get(email)
     if not user:
         session.pop("user_email", None)
-        return redirect(url_for("signup", msg="Create your PatternCraft.app account to continue."))
+        return redirect(
+            url_for("signup", msg="Create your free PatternCraft.app account to continue.")
+        )
 
-    user.setdefault("patterns", [])
-    subscription = user.get("subscription", "free")
-    credits = int(user.get("credits", 0) or 0)
-    mark_free_used = False
-    consume_credit = False
-
-    # Membership logic
-    if has_unlimited_access(user):
-        pass
-    elif credits > 0:
-        consume_credit = True
-    else:
-        if user.get("free_used"):
-            return redirect(url_for("pricing", reason="used_free"))
-        else:
-            mark_free_used = True
+    patterns = user.get("patterns", [])
+    if len(patterns) >= 1:
+        # One full pattern per account while in beta
+        return redirect(
+            url_for(
+                "index",
+                err="Beta limit: one full pattern per account for now. Your existing patterns are saved under My Patterns.",
+            )
+        )
 
     file = request.files.get("file")
     if not file:
@@ -715,13 +575,16 @@ def convert():
     if max(base.size) > MAX_DIM:
         return jsonify({"error": "image_too_large", "max_dim": MAX_DIM}), 400
 
-    pattern_id = uuid.uuid4().hex
-    pattern_name = file.filename or f"Pattern {pattern_id[:8]}"
+    original_name = getattr(file, "filename", "") or "pattern"
+
+    pattern_id = uuid.uuid4().hex[:12]
+    user_dir = get_user_pattern_dir(email)
+    zip_path = os.path.join(user_dir, f"{pattern_id}.zip")
+    grid_path = os.path.join(user_dir, f"{pattern_id}_grid.png")
+    legend_path = os.path.join(user_dir, f"{pattern_id}_legend.csv")
+    meta_path = os.path.join(user_dir, f"{pattern_id}_meta.json")
 
     out_zip = io.BytesIO()
-    grid_img_for_preview: Optional[Image.Image] = None
-    sx = sy = 0
-    counts: Dict[Tuple[int, int, int], int] = {}
 
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
         if ptype in ("cross", "knit"):
@@ -742,15 +605,18 @@ def convert():
             if want_symbols or want_pdf:
                 pal = sorted(counts.keys(), key=lambda c: counts[c], reverse=True)
                 sym_map = assign_symbols(pal)
-                sym_img = draw_symbols_on_grid(quant, cell_px=CELL_PX, sym_map=sym_map)
+                sym_img = draw_symbols_on_grid(
+                    quant, cell_px=CELL_PX, sym_map=sym_map
+                )
                 if want_pdf:
                     pdf_buf = io.BytesIO()
-                    sym_img.convert("RGB").save(pdf_buf, format="PDF", resolution=300.0)
+                    sym_img.convert("RGB").save(
+                        pdf_buf, format="PDF", resolution=300.0
+                    )
                     pdf_bytes = pdf_buf.getvalue()
                 grid_img = sym_img
 
-            grid_img_for_preview = grid_img.copy()
-
+            # Legend CSV with color codes and floss estimate
             total_stitches = sum(counts.values()) or 1
             lines = ["hex,r,g,b,stitches,percent,skeins_est"]
             for (r, g, b), c in sorted(
@@ -762,12 +628,13 @@ def convert():
                 lines.append(
                     f"{to_hex((r,g,b))},{r},{g},{b},{c},{(100*c/total_stitches):.2f},{skeins:.2f}"
                 )
-            z.writestr("legend.csv", "\n".join(lines))
+            legend_csv = "\n".join(lines)
+            z.writestr("legend.csv", legend_csv)
 
             note = (
                 "Knitting preview compresses row height; verify gauge."
                 if ptype == "knit"
-                else "Cross-stitch grid with 10×10 guides."
+                else "Cross-stitch grid with 10×10 guides and symbol overlay."
             )
             meta = {
                 "type": ptype,
@@ -780,142 +647,77 @@ def convert():
                 "waste_percent": waste_pct,
                 "finished_size_in": [finished_w_in, finished_h_in],
                 "notes": note,
+                "source_filename": original_name,
             }
-            z.writestr("meta.json", json.dumps(meta, indent=2))
+            meta_json = json.dumps(meta, indent=2)
+            z.writestr("meta.json", meta_json)
 
             buf_png = io.BytesIO()
             grid_img.save(buf_png, format="PNG")
-            z.writestr("grid.png", buf_png.getvalue())
+            grid_bytes = buf_png.getvalue()
+            z.writestr("grid.png", grid_bytes)
             if pdf_bytes:
                 z.writestr("pattern.pdf", pdf_bytes)
+
+            # Persist for "My Patterns"
+            with open(grid_path, "wb") as f:
+                f.write(grid_bytes)
+            with open(legend_path, "w", encoding="utf-8") as f:
+                f.write(legend_csv)
+            with open(meta_path, "w", encoding="utf-8") as f:
+                f.write(meta_json)
 
         elif ptype == "emb":
             small = resize_for_stitch_width(base, stitch_w)
             bw = to_monochrome(small, threshold=emb_thresh)
             pts = serpentine_points(bw, step=emb_step)
-            for name, data in write_embroidery_outputs(pts).items():
+            emb_files = write_embroidery_outputs(pts)
+            for name, data in emb_files.items():
                 z.writestr(name, data)
-            z.writestr(
-                "meta.json",
-                json.dumps(
-                    {
-                        "type": "emb",
-                        "stitch_style": "run",
-                        "points": len(pts),
-                        "pyembroidery": HAS_PYEMB,
-                    },
-                    indent=2,
-                ),
-            )
+            meta = {
+                "type": "emb",
+                "stitch_style": "run",
+                "points": len(pts),
+                "pyembroidery": HAS_PYEMB,
+                "source_filename": original_name,
+            }
+            meta_json = json.dumps(meta, indent=2)
+            z.writestr("meta.json", meta_json)
+            with open(meta_path, "w", encoding="utf-8") as f:
+                f.write(meta_json)
         else:
             return jsonify({"error": "unknown_ptype"}), 400
 
-    # Save usage and membership changes
-    if consume_credit and credits > 0:
-        user["credits"] = max(0, credits - 1)
-    if mark_free_used:
-        user["free_used"] = True
+    # Save ZIP for later downloads
+    zip_bytes = out_zip.getvalue()
+    with open(zip_path, "wb") as f:
+        f.write(zip_bytes)
 
-    # Save pattern preview + ZIP path to user's history
-    try:
-        zip_bytes = out_zip.getvalue()
-        zip_filename = f"{pattern_id}.zip"
-        zip_path = os.path.join(PATTERN_DIR, zip_filename)
-        with open(zip_path, "wb") as f:
-            f.write(zip_bytes)
-
-        preview_filename = None
-        if grid_img_for_preview is not None:
-            preview_filename = f"{pattern_id}.png"
-            preview_path = os.path.join(PREVIEW_DIR, preview_filename)
-            grid_img_for_preview.save(preview_path, format="PNG")
-
-        pattern_record = {
-            "id": pattern_id,
-            "name": pattern_name,
-            "created_at": dt.datetime.utcnow().isoformat() + "Z",
-            "type": ptype,
-            "stitch_style": stitch_style,
-            "stitches_w": sx,
-            "stitches_h": sy,
-            "colors": len(counts) if counts else None,
-            "zip_file": zip_filename,
-            "preview_file": preview_filename,
-        }
-        patterns = user.get("patterns") or []
-        patterns.append(pattern_record)
-        user["patterns"] = patterns
-    except Exception:
-        # Do not break the download if saving history fails
-        pass
-
+    # Update user record: mark free_used and attach pattern metadata
+    pattern_entry = {
+        "id": pattern_id,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "ptype": ptype,
+        "title": original_name or "Pattern",
+    }
+    patterns = user.get("patterns") or []
+    patterns.append(pattern_entry)
+    user["patterns"] = patterns
+    user["free_used"] = True
     users[email] = user
     save_users(users)
 
+    # Return ZIP immediately
     out_zip.seek(0)
     return send_file(
         out_zip,
         mimetype="application/zip",
         as_attachment=True,
-        download_name=f"{pattern_name or 'pattern'}.zip",
+        download_name=f"pattern_{ptype}.zip",
     )
 
 
-# ---------------------- PATTERNS DASHBOARD ----------------------
-
-@app.get("/patterns")
-def patterns():
-    user = get_current_user()
-    if not user:
-        return redirect(url_for("login", msg="Log in to view your saved patterns."))
-    users = load_users()
-    u = users.get(user["email"], {})
-    u.setdefault("patterns", [])
-    patterns_list = list(reversed(u["patterns"]))
-    return render_template_string(PATTERNS_HTML, user=u, patterns=patterns_list)
-
-
-@app.get("/pattern/preview/<pattern_id>")
-def pattern_preview(pattern_id: str):
-    user = get_current_user()
-    if not user:
-        return redirect(url_for("login", msg="Log in to view your patterns."))
-    users = load_users()
-    u = users.get(user["email"])
-    if not u:
-        return "Not found", 404
-    for p in u.get("patterns", []):
-        if p.get("id") == pattern_id and p.get("preview_file"):
-            path = os.path.join(PREVIEW_DIR, p["preview_file"])
-            if os.path.exists(path):
-                return send_file(path, mimetype="image/png")
-    return "Not found", 404
-
-
-@app.get("/pattern/download/<pattern_id>")
-def pattern_download(pattern_id: str):
-    user = get_current_user()
-    if not user:
-        return redirect(url_for("login", msg="Log in to download your patterns."))
-    users = load_users()
-    u = users.get(user["email"])
-    if not u:
-        return "Not found", 404
-    for p in u.get("patterns", []):
-        if p.get("id") == pattern_id and p.get("zip_file"):
-            path = os.path.join(PATTERN_DIR, p["zip_file"])
-            if os.path.exists(path):
-                fname = (p.get("name") or "pattern").replace("/", "_")
-                return send_file(
-                    path,
-                    mimetype="application/zip",
-                    as_attachment=True,
-                    download_name=f"{fname}.zip",
-                )
-    return "Not found", 404
-
-
-# ---------------------- INLINE HTML: HOME -----------------------
+# ---------------------- INLINE HTML: HOMEPAGE ----------------------
 
 HOMEPAGE_HTML = r"""
 <!doctype html>
@@ -924,174 +726,202 @@ HOMEPAGE_HTML = r"""
   <meta charset="utf-8">
   <title>PatternCraft.app — Turn art into stitchable patterns</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" type="image/svg+xml"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' ry='7' fill='%23FACC15'/%3E%3Cpath d='M9 22V9h7.2a4.3 4.3 0 1 1 0 8.6H12v4.4H9zm3-7h4.1a2.3 2.3 0 0 0 0-4.6H12V15z' fill='%231F2933'/%3E%3C/svg%3E">
   <style>
     :root{
-      --bg:#FFF9E6;--fg:#222222;--muted:#6b6b6b;
-      --line:#f1e4b8;--radius:16px;--shadow:0 12px 30px rgba(148,131,68,.25);
-      --accent:#f59e0b;--accent-dark:#c26e00;--accent-soft:#fef3c7;
-      --pill:#f59e0b;--pill-text:#1f2933;
-      --chip-bg:#fff7cc;
+      --bg:#FFFDF2;
+      --fg:#1F2933;
+      --muted:#6B7280;
+      --line:#F4E5A9;
+      --card:#FFFFFF;
+      --radius:18px;
+      --shadow:0 16px 40px rgba(15,23,42,.16);
+      --accent:#F59E0B;
+      --accent-strong:#C97700;
+      --accent-soft:#FFF3C4;
+      --danger:#DC2626;
     }
     *{box-sizing:border-box;}
     body{
       margin:0;
-      font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
+      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;
       color:var(--fg);
       background:
-        radial-gradient(circle at top left,#fef3c7 0,#fff 35%,transparent 60%),
-        radial-gradient(circle at top right,#fde68a 0,#fff 40%,transparent 65%),
-        linear-gradient(to bottom,#fff7e6,#fff);
+        radial-gradient(circle at top left,#FEF3C7 0,#FFFDF2 45%,transparent 60%),
+        radial-gradient(circle at bottom right,#FDE68A 0,#FFF7ED 45%,transparent 60%),
+        linear-gradient(to bottom,#FFFDF2,#FFF7ED);
     }
-    a{color:#1d4ed8;text-decoration:none;}
+    a{color:var(--accent-strong);text-decoration:none;}
     a:hover{text-decoration:underline;}
-    .wrap{max-width:1080px;margin:0 auto;padding:20px 16px 40px}
-    h1{font-size:2.2rem;margin:0 0 8px}
-    h2{margin:0 0 10px;font-size:1.3rem}
+    .wrap{max-width:1100px;margin:0 auto;padding:26px 18px 52px;}
     .topbar{
       display:flex;align-items:center;justify-content:space-between;
-      margin-bottom:18px;
+      margin-bottom:20px;
     }
     .brand{
       display:flex;align-items:center;gap:8px;
-      font-weight:800;font-size:19px;letter-spacing:.08em;text-transform:uppercase;
+      font-weight:900;font-size:20px;letter-spacing:.05em;text-transform:uppercase;
     }
     .brand-mark{
-      width:26px;height:26px;border-radius:10px;
-      background:linear-gradient(135deg,#fbbf24,#f97316);
+      width:26px;height:26px;border-radius:9px;
+      background:linear-gradient(135deg,#FACC15,#F97316);
       display:flex;align-items:center;justify-content:center;
-      font-size:13px;font-weight:800;color:white;
-      box-shadow:0 4px 10px rgba(245,158,11,.55);
+      font-size:14px;font-weight:800;color:#1F2933;
     }
-    .top-links{font-size:13px;color:#4b5563}
-    .top-links a{margin-left:10px;}
-    .chip{
-      display:inline-flex;align-items:center;gap:6px;
-      padding:4px 10px;border-radius:999px;
-      background:var(--chip-bg);border:1px solid rgba(234,179,8,.6);
-      font-size:11px;color:#854d0e;text-transform:uppercase;letter-spacing:.08em;
+    .top-links{font-size:13px;color:#4B5563;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+    .top-links strong{font-weight:600;}
+    .top-links a{font-weight:500;}
+    .pill{
+      display:inline-flex;align-items:center;justify-content:center;
+      min-height:42px;padding:0 24px;border-radius:999px;
+      border:none;cursor:pointer;
+      font-size:14px;font-weight:700;letter-spacing:.02em;
+      background:linear-gradient(135deg,#FACC15,#F97316);
+      color:#1F2933;
+      box-shadow:0 10px 26px rgba(217,119,6,.45);
+      transition:transform .08s,box-shadow .08s,background .08s;
     }
-    .chip-dot{width:8px;height:8px;border-radius:999px;background:#22c55e}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 14px 32px rgba(217,119,6,.55);}
+    .pill.secondary{
+      background:#FFFFFF;
+      border:1px solid #E5E7EB;
+      box-shadow:0 6px 18px rgba(15,23,42,.12);
+      color:#111827;
+    }
+    .pill.secondary:hover{box-shadow:0 10px 26px rgba(15,23,42,.16);}
+    .pill.outline{
+      background:transparent;
+      color:#C97700;
+      border:1px solid #FACC15;
+      box-shadow:none;
+    }
+    .pill.outline:hover{
+      background:#FFF7C2;
+      box-shadow:0 6px 18px rgba(250,204,21,.45);
+    }
     .hero{
-      display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,2fr);
-      gap:18px;margin-bottom:24px;align-items:center;
+      display:grid;
+      grid-template-columns:minmax(0,3fr) minmax(280px,2.2fr);
+      gap:22px;margin-bottom:26px;align-items:center;
     }
-    .hero-tagline{color:var(--muted);max-width:420px;font-size:14px;}
-    .muted{color:var(--muted);font-size:13px}
+    h1{font-size:2.4rem;margin:6px 0 6px;}
+    .kicker{
+      font-size:12px;text-transform:uppercase;letter-spacing:.15em;
+      color:#9CA3AF;font-weight:700;
+    }
+    .hero-tagline{color:var(--muted);max-width:460px;font-size:14px;}
+    .hero-cta-row{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;}
+    .hero-note{font-size:12px;color:#4B5563;margin-top:10px;}
+    .badge-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;}
+    .badge{
+      font-size:11px;padding:5px 10px;border-radius:999px;
+      background:#FEF3C7;color:#92400E;border:1px solid #FDE68A;
+      text-transform:uppercase;letter-spacing:.08em;font-weight:700;
+    }
+    .badge-ghost{
+      background:#EEF2FF;color:#4338CA;border-color:#E0E7FF;
+    }
     .card{
-      background:#fffbe9;
+      background:var(--card);
       border-radius:var(--radius);
       border:1px solid var(--line);
       box-shadow:var(--shadow);
-      padding:20px;
+      padding:20px 18px;
     }
-    .pill{
-      padding:11px 22px;border-radius:999px;
-      background:var(--accent);
-      color:var(--pill-text);
-      border:none;cursor:pointer;
-      font-size:14px;font-weight:700;letter-spacing:.02em;
-      box-shadow:0 8px 20px rgba(245,158,11,.5);
-      transition:transform .08s,box-shadow .08s,background .08s;
-      display:inline-block;
-      text-decoration:none;
-      text-align:center;
+    .hero-right-title{
+      font-size:14px;font-weight:700;margin-bottom:6px;
+      text-transform:uppercase;letter-spacing:.12em;color:#9CA3AF;
     }
-    .pill:hover{
-      transform:translateY(-1px);
-      box-shadow:0 12px 26px rgba(245,158,11,.6);
-      background:var(--accent-dark);
-      color:#fff;
+    .hero-right-main{font-size:14px;color:#111827;margin:0 0 6px;}
+    .hero-right-list{font-size:13px;color:#4B5563;padding-left:18px;margin:8px 0;}
+    .hero-right-divider{
+      margin:12px 0;border-top:1px dashed #E5E7EB;
     }
-    .pill-secondary{
-      background:#fff;
-      color:#92400e;
-      border:1px solid rgba(234,179,8,.7);
-      box-shadow:none;
-    }
-    .pill-secondary:hover{
-      box-shadow:0 6px 18px rgba(148,131,68,.35);
-    }
-    .pill-large{
-      padding:13px 26px;
-      font-size:15px;
-    }
-    .hero-cta-row{
-      display:flex;gap:12px;margin-top:14px;flex-wrap:wrap;align-items:center;
-    }
-    .hero-note{font-size:12px;color:#6b7280;margin-top:8px;}
-    .badge-row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-    .badge{
-      font-size:11px;padding:4px 9px;border-radius:999px;
-      background:#fef3c7;color:#92400e;border:1px solid #facc15;
-    }
-    .why-list{
-      padding-left:18px;
-      margin:8px 0 0;
-      font-size:13px;
-      color:#4b5563;
-    }
-    .why-list li{margin-bottom:4px;}
+    .hero-right-foot{font-size:12px;color:#6B7280;}
 
-    .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.25fr);}
+    .section-title{font-size:1.1rem;margin:0 0 4px;}
+    .section-sub{font-size:13px;color:#6B7280;margin:0 0 12px;}
+
+    .two-col{
+      display:grid;
+      grid-template-columns:minmax(0,1.3fr) minmax(260px,1fr);
+      gap:18px;
+    }
+
     .file{
-      border:2px dashed var(--accent);
+      border:2px dashed #FBBF24;
       border-radius:18px;
       padding:18px;
       display:flex;align-items:center;gap:12px;
       cursor:pointer;
-      background:var(--accent-soft);
-      transition:background .15s,border-color .15s,transform .1s,box-shadow .1s;
-      width:100%;
+      background:#FFFBEB;
+      transition:background .15s,border-color .15s,transform .08s,box-shadow .08s;
     }
     .file:hover{
-      background:#fef3c7;border-color:#f59e0b;
+      background:#FEF3C7;border-color:#F59E0B;
       transform:translateY(-1px);
-      box-shadow:0 6px 18px rgba(148,131,68,.35);
+      box-shadow:0 10px 22px rgba(217,119,6,.3);
     }
+    .file.disabled{
+      opacity:.7;cursor:pointer;
+    }
+    .file input{display:none;}
+    .file-label-main{
+      font-weight:800;font-size:15px;text-transform:uppercase;letter-spacing:.08em;
+    }
+    .file-label-sub{font-size:12px;color:#6B7280;}
     .file-ready{
-      background:#ecfccb;
-      border-color:#16a34a;
-      box-shadow:0 6px 18px rgba(22,163,74,.45);
+      background:#ECFDF3;border-color:#16A34A;
+      box-shadow:0 10px 22px rgba(22,163,74,.35);
     }
-    .file input{display:none}
-    .file-label-main{font-weight:800;font-size:15px;text-transform:uppercase;letter-spacing:.06em}
-    .file-label-sub{font-size:12px;color:#6b7280}
-    .file-btn{
-      border-style:solid;
+
+    fieldset{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px;
+      margin:10px 0;
     }
-    .free-note{
-      margin-top:6px;font-size:12px;color:#166534;background:#dcfce7;
-      border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center;gap:6px;
-    }
-    .free-dot{width:8px;height:8px;border-radius:999px;background:#22c55e}
-    fieldset{border:1px solid var(--line);border-radius:12px;padding:10px;margin:10px 0}
-    legend{font-size:13px;padding:0 4px;color:#92400e;}
-    .row{display:flex;flex-wrap:wrap;gap:12px}
-    .row > label{flex:1 1 150px;font-size:13px}
+    legend{font-size:13px;padding:0 4px;color:#6B7280;}
+    .row{display:flex;flex-wrap:wrap;gap:12px;}
+    .row > label{flex:1 1 150px;font-size:13px;}
     .row input,.row select{
-      width:100%;margin-top:3px;padding:7px 9px;border-radius:10px;
-      border:1px solid #e5e7eb;font-size:13px;
+      width:100%;margin-top:3px;padding:7px 10px;border-radius:9px;
+      border:1px solid #E5E7EB;font-size:13px;
     }
     .row input:focus,.row select:focus{
-      outline:none;border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.5);
+      outline:none;border-color:#F59E0B;box-shadow:0 0 0 1px rgba(245,158,11,.4);
     }
-    label{font-size:13px}
-    .controls-note{font-size:11px;color:#9ca3af;margin-top:4px}
-    .hidden{display:none}
-    .section-title{font-size:1.2rem;margin-bottom:6px}
-    .foot-row{font-size:11px;color:#9ca3af;margin-top:8px}
+    label{font-size:13px;}
+    .controls-note{font-size:11px;color:#9CA3AF;margin-top:4px;}
+    .hidden{display:none;}
 
-    .pill-ready{
-      background:#16a34a !important;
-      color:#fff !important;
-      box-shadow:0 8px 20px rgba(22,163,74,.6) !important;
+    .free-note{
+      margin-top:8px;font-size:12px;color:#166534;background:#DCFCE7;
+      border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center;gap:6px;
+    }
+    .free-dot{width:8px;height:8px;border-radius:999px;background:#16A34A;}
+
+    .error-banner{
+      margin-top:8px;font-size:12px;color:#B91C1C;background:#FEE2E2;
+      border-radius:9px;padding:8px 10px;
     }
 
-    .dashboard-link{font-size:13px;color:#6b7280;margin-top:6px;}
+    .why-card{
+      background:#FFFBEB;border-radius:var(--radius);
+      border:1px dashed #FACC15;padding:18px;margin-top:22px;
+    }
+    .why-card h2{margin:0 0 6px;font-size:1.05rem;}
+    .why-list{font-size:13px;color:#4B5563;padding-left:18px;margin:6px 0;}
+    .why-list li{margin:3px 0;}
 
-    @media (max-width:860px){
-      .hero{grid-template-columns:1fr}
-      .make-layout{grid-template-columns:1fr}
+    .my-pattern-link{
+      font-size:13px;margin-top:10px;color:#4B5563;
+    }
+
+    @media (max-width:880px){
+      .hero{grid-template-columns:1fr;}
+      .two-col{grid-template-columns:1fr;}
     }
   </style>
 </head>
@@ -1101,116 +931,114 @@ HOMEPAGE_HTML = r"""
   <div class="topbar">
     <div class="brand">
       <div class="brand-mark">PC</div>
-      <span>PatternCraft.app</span>
+      <div>PatternCraft.app</div>
     </div>
     <div class="top-links">
-      <a href="/pricing">Pricing</a>
-      <a href="/patterns">My patterns</a>
       {% if user %}
-        · Signed in as {{ user.email }}
+        <span><strong>Signed in:</strong> {{ user.email }}</span>
+        · <a href="/patterns">My patterns</a>
         · <a href="/logout">Sign out</a>
       {% else %}
-        · <a href="/login">Log in</a>
-        · <a href="/signup">Create Free Account</a>
+        <a href="/login">Log in</a>
+        · <a href="/signup" class="pill outline">Create Free Account</a>
       {% endif %}
     </div>
   </div>
 
   <div class="hero">
-    <div class="hero-text">
-      <div class="chip">
-        <span class="chip-dot"></span>
-        <span>For cross-stitch, knitting, and quilting</span>
-      </div>
+    <div>
+      <div class="kicker">Picture in · pattern out</div>
       <h1>Turn art into stitchable patterns</h1>
       <p class="hero-tagline">
-        PatternCraft.app transforms your photos and artwork into clean, printable grids with legends.
-        Choose a plan, upload a picture, and download a stitch-ready pattern in minutes.
+        Upload your artwork once and PatternCraft.app turns it into a stitchable grid with
+        color legend and stitch counts. Designed for cross‑stitch, knitting charts, and line embroidery.
       </p>
       <div class="hero-cta-row">
         {% if user %}
-          <button class="pill pill-large" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
-            Open the tool
+          <button class="pill" onclick="document.getElementById('make').scrollIntoView({behavior:'smooth'})">
+            Open the pattern tool
           </button>
+          <a class="pill secondary" href="/patterns">View my patterns</a>
         {% else %}
-          <a class="pill pill-large" href="/login?msg=Log+in+to+open+the+PatternCraft+tool.">
-            Open the tool
+          <a class="pill" href="/signup">
+            Create Free Account
+          </a>
+          <a class="pill secondary" href="/login">
+            Log in
           </a>
         {% endif %}
-        <a class="pill pill-secondary" href="/pricing#plans">
-          View pricing
-        </a>
       </div>
       <div class="hero-note">
-        Every new account includes <strong>one free pattern</strong>. Upgrade later with a single, pack, or unlimited plan.
+        Every account includes <strong>one full pattern on us</strong>, plus an optional
+        monthly email with ideas and tips for new designs.
       </div>
       <div class="badge-row">
-        <span class="badge">Clean printable grids</span>
-        <span class="badge">Color legends & size estimates</span>
-        <span class="badge">Save & revisit past patterns</span>
+        <span class="badge">One free pattern per account (beta)</span>
+        <span class="badge badge-ghost">Patterns saved to your account</span>
       </div>
+      {% if error %}
+        <div class="error-banner" style="max-width:460px;">{{ error }}</div>
+      {% endif %}
     </div>
 
     <div class="card">
-      <h2>Why makers use PatternCraft.app</h2>
-      <ul class="why-list">
+      <div class="hero-right-title">Why makers use PatternCraft.app</div>
+      <p class="hero-right-main">
+        A purpose‑built pattern tool with stitchers in mind.
+      </p>
+      <ul class="hero-right-list">
         <li>Clean grids with bold 10×10 guides and symbol overlays</li>
         <li>Color legends with hex and RGB values for accurate palettes</li>
         <li>Fabric size estimates based on stitch count and cloth count</li>
         <li>Knitting charts that respect row proportions</li>
-        <li>Embroidery line exports ready for your machine software</li>
+        <li>Embroidery line outputs ready for your machine software</li>
       </ul>
+      <div class="hero-right-divider"></div>
+      <div class="hero-right-foot">
+        Your patterns are saved to your account so you can return later to view, print, or download again.
+      </div>
     </div>
   </div>
 
   <div id="make" class="card">
-    <h2 class="section-title">Make a pattern</h2>
-    <p class="muted">
-      Upload artwork, pick your stitch settings, and download a full ZIP with grid, legend, and metadata.
-      {% if not user %}
-        Create a free account to use the tool (includes one pattern on us).
-      {% endif %}
-    </p>
-    <div class="make-layout">
-      <div class="make-main">
+    <div class="two-col">
+      <div>
+        <h2 class="section-title">Make a pattern</h2>
+        <p class="section-sub">
+          Create a free account or log in to generate a pattern. While we’re in beta,
+          every account can create one full pattern that stays saved under <strong>My patterns</strong>.
+        </p>
+
         <form method="POST" action="/api/convert" enctype="multipart/form-data">
-          {% if user %}
-          <label class="file">
-            <input id="fileInput" type="file" name="file" accept="image/*" required onchange="pickFile(this)">
+          <label class="file {% if not user %}disabled{% endif %}" onclick="redirectIfAnon(event)">
+            <input id="fileInput" type="file" name="file" accept="image/*"
+                   {% if not user %} disabled{% endif %} onchange="pickFile(this)">
             <div>
-              <div class="file-label-main">UPLOAD PICTURE HERE</div>
+              <div class="file-label-main" id="fileLabelMain">UPLOAD PICTURE HERE</div>
               <div class="file-label-sub">
-                Drop in your artwork or tap to browse from your device.
+                {% if user %}
+                  Drop in your artwork or tap to browse from your device.
+                {% else %}
+                  Create a free account or log in to upload an image.
+                {% endif %}
               </div>
             </div>
           </label>
-          {% else %}
-          <button class="file file-btn" type="button"
-            onclick="location.href='/login?msg=Log+in+or+create+a+free+account+to+upload+a+picture+and+generate+your+first+pattern.'">
-            <div>
-              <div class="file-label-main">UPLOAD PICTURE HERE</div>
-              <div class="file-label-sub">
-                Log in or create a free account (includes 1 pattern) to use the tool.
-              </div>
-            </div>
-          </button>
-          {% endif %}
 
           {% if not user %}
-          <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
             <div class="free-note">
               <div class="free-dot"></div>
               <span>
-                New here? <a href="/signup">Create Free Account</a>.
+                New here? <a href="/signup">Create your free account</a>.
                 Already joined? <a href="/login">Log in</a>.
               </span>
             </div>
-          </div>
           {% endif %}
 
+          {% if user %}
           <fieldset>
             <legend>Pattern type</legend>
-            <label><input type="radio" name="ptype" value="cross" checked> Cross-stitch</label>
+            <label><input type="radio" name="ptype" value="cross" checked> Cross‑stitch</label>
             <label style="margin-left:12px"><input type="radio" name="ptype" value="knit"> Knitting</label>
             <label style="margin-left:12px"><input type="radio" name="ptype" value="emb"> Embroidery</label>
           </fieldset>
@@ -1228,7 +1056,7 @@ HOMEPAGE_HTML = r"""
                 <select id="stitch_style" name="stitch_style"></select>
               </label>
             </div>
-            <p class="controls-note">Defaults work well for most art. Adjust once you know your preferences.</p>
+            <p class="controls-note">Defaults work well for most art. Adjust once you know your style.</p>
           </fieldset>
 
           <fieldset id="crossKnitBlock">
@@ -1250,8 +1078,8 @@ HOMEPAGE_HTML = r"""
 
           <fieldset id="embBlock" class="hidden">
             <legend>Embroidery options</legend>
-            <p class="muted">
-              Generates a simple run-stitch path you can refine in your embroidery software.
+            <p class="controls-note">
+              Simple run‑stitch path from your image. For advanced digitizing, continue in your embroidery software.
             </p>
             <div class="row">
               <label>Threshold
@@ -1263,50 +1091,70 @@ HOMEPAGE_HTML = r"""
             </div>
           </fieldset>
 
-          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <button class="pill" id="generateBtn" type="submit" {% if not user %}disabled{% endif %}>
-              Generate pattern ZIP
-            </button>
-            <span class="muted">
-              Your download includes <code>grid.png</code>, <code>legend.csv</code>, <code>meta.json</code>, and optional <code>pattern.pdf</code> or embroidery files.
+          <div style="margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <button class="pill" id="generateBtn" type="submit">Generate pattern ZIP</button>
+            <span class="controls-note">
+              Download includes grid.png, legend.csv, meta.json, and optional pattern.pdf or embroidery files.
             </span>
-          </div>
-
-          {% if user %}
-          <div class="dashboard-link">
-            After generating, your pattern is saved on your account under <a href="/patterns">My patterns</a>.
           </div>
           {% endif %}
         </form>
+
+        {% if user %}
+          <div class="my-pattern-link">
+            Finished patterns are saved to your account. Visit <a href="/patterns">My patterns</a> to re‑view and re‑download.
+          </div>
+        {% endif %}
       </div>
-    </div>
-    <div class="foot-row">
-      Tip: Start with simpler, high-contrast images for the cleanest stitch results. You can adjust colors and size before printing.
+
+      <div>
+        <div class="why-card">
+          <h2>How it works</h2>
+          <ul class="why-list">
+            <li>Select your stitch type and size.</li>
+            <li>Upload a photo, illustration, or logo.</li>
+            <li>PatternCraft analyzes it and builds a stitch grid.</li>
+            <li>You get a pattern image, legend with codes, and a ZIP you can print or archive.</li>
+          </ul>
+          <p class="controls-note">
+            While we’re in beta, accounts are limited to one full pattern each so we can keep things fast and reliable.
+          </p>
+        </div>
+      </div>
     </div>
   </div>
 
 </div>
 <script>
+  const IS_LOGGED_IN = {{ "true" if user else "false" }};
+
+  function redirectIfAnon(evt){
+    if(!IS_LOGGED_IN){
+      evt.preventDefault();
+      window.location.href = "/login?msg=" + encodeURIComponent(
+        "Create a free account to upload your first PatternCraft.app pattern."
+      );
+    }
+  }
+
   function pickFile(inp){
     const wrapper = inp.closest('label');
-    const label = wrapper ? wrapper.querySelector('.file-label-main') : null;
+    const labelMain = document.getElementById('fileLabelMain');
     const generateBtn = document.getElementById('generateBtn');
-
-    if (!inp.files || !inp.files[0]){
-      if (wrapper) wrapper.classList.remove('file-ready');
-      if (label) label.textContent = 'UPLOAD PICTURE HERE';
-      if (generateBtn) generateBtn.classList.remove('pill-ready');
+    if(!inp.files || !inp.files[0]){
+      if(wrapper) wrapper.classList.remove('file-ready');
+      if(labelMain) labelMain.textContent = 'UPLOAD PICTURE HERE';
+      if(generateBtn) generateBtn.classList.remove('file-ready');
       return;
     }
-
-    if (wrapper) wrapper.classList.add('file-ready');
-    if (label) label.textContent = 'IMAGE ATTACHED';
-    if (generateBtn) generateBtn.classList.add('pill-ready');
+    if(wrapper) wrapper.classList.add('file-ready');
+    if(labelMain) labelMain.textContent = 'IMAGE ATTACHED';
+    if(generateBtn) generateBtn.classList.add('file-ready');
   }
 
   function setStyleOptions(type){
     const sel = document.getElementById('stitch_style');
-    if (!sel) return;
+    if(!sel) return;
     sel.innerHTML = '';
     let opts = [];
     if(type === 'cross'){
@@ -1337,12 +1185,14 @@ HOMEPAGE_HTML = r"""
     const type = typeInput ? typeInput.value : 'cross';
     const crossKnit = document.getElementById('crossKnitBlock');
     const emb = document.getElementById('embBlock');
-    if(type === 'emb'){
-      crossKnit.classList.add('hidden');
-      emb.classList.remove('hidden');
-    } else {
-      crossKnit.classList.remove('hidden');
-      emb.classList.add('hidden');
+    if(crossKnit && emb){
+      if(type === 'emb'){
+        crossKnit.classList.add('hidden');
+        emb.classList.remove('hidden');
+      } else {
+        crossKnit.classList.remove('hidden');
+        emb.classList.add('hidden');
+      }
     }
     setStyleOptions(type);
   }
@@ -1356,68 +1206,70 @@ HOMEPAGE_HTML = r"""
 </html>
 """
 
-# ---------------------- INLINE HTML: AUTH & PRICING --------------
+# ---------------------- INLINE HTML: SIGNUP / LOGIN / PATTERNS ----------------------
 
 SIGNUP_HTML = r"""
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Create your account — PatternCraft.app</title>
+  <title>Create your free account — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{margin:0;background:#FFF9E6;font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#111827}
-    .wrap{max-width:520px;margin:0 auto;padding:32px 16px 40px}
+    body{margin:0;background:#FFFDF2;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#1F2933;}
+    .wrap{max-width:520px;margin:0 auto;padding:40px 16px 46px;}
     .card{
-      background:#fff;
-      border-radius:16px;
-      border:1px solid #f4e4ae;
-      padding:22px;
-      box-shadow:0 12px 30px rgba(148,131,68,.3);
+      background:#FFFFFF;border-radius:18px;border:1px solid #F4E5A9;
+      padding:22px;box-shadow:0 16px 40px rgba(15,23,42,.18);
     }
-    h1{margin:0 0 10px;font-size:1.6rem}
-    .muted{font-size:13px;color:#6b7280}
-    label{display:block;font-size:13px;margin-top:12px}
+    h1{margin:0 0 8px;font-size:1.8rem;}
+    .muted{font-size:13px;color:#6B7280;}
+    label{display:block;font-size:13px;margin-top:12px;}
     input[type="email"],input[type="password"]{
-      width:100%;margin-top:4px;padding:9px 11px;border-radius:10px;
-      border:1px solid #e5e7eb;font-size:14px;
+      width:100%;margin-top:4px;padding:9px 11px;border-radius:11px;
+      border:1px solid #E5E7EB;font-size:14px;
     }
     input:focus{
-      outline:none;border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.6);
+      outline:none;border-color:#F59E0B;box-shadow:0 0 0 1px rgba(245,158,11,.4);
     }
     .pill{
-      margin-top:16px;padding:11px 22px;border-radius:999px;
-      border:none;background:#f59e0b;color:#1f2933;
+      margin-top:16px;padding:10px 22px;border-radius:999px;
+      border:none;background:linear-gradient(135deg,#FACC15,#F97316);color:#1F2933;
       font-size:14px;font-weight:700;cursor:pointer;
-      box-shadow:0 8px 20px rgba(245,158,11,.5);
-      width:100%;
+      box-shadow:0 12px 30px rgba(217,119,6,.45);
+      display:inline-flex;align-items:center;justify-content:center;
     }
-    .pill:hover{
-      transform:translateY(-1px);
-      box-shadow:0 12px 26px rgba(245,158,11,.6);
-      background:#c26e00;color:#fff;
-    }
-    .msg{margin-top:10px;font-size:13px;color:#b91c1c}
-    a{color:#1d4ed8;text-decoration:none;}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 15px 36px rgba(217,119,6,.52);}
+    .msg{margin-top:10px;font-size:13px;color:#B91C1C;}
+    a{color:#C97700;text-decoration:none;}
     a:hover{text-decoration:underline;}
-    ul{font-size:13px;color:#4b5563;padding-left:18px;margin-top:10px}
-    .top-link{font-size:13px;margin-bottom:10px;}
-    .top-link a{font-weight:600;}
+    ul{font-size:13px;color:#4B5563;padding-left:18px;margin-top:10px;}
+    .free-chip{
+      display:inline-flex;align-items:center;gap:6px;
+      padding:5px 10px;border-radius:999px;
+      background:#FEF3C7;color:#92400E;font-size:11px;
+      text-transform:uppercase;letter-spacing:.09em;font-weight:700;
+      margin-bottom:8px;
+    }
+    .dot{width:8px;height:8px;border-radius:999px;background:#16A34A;}
+    .disclaimer{
+      margin-top:10px;font-size:11px;color:#6B7280;
+      background:#FFFBEB;border-radius:12px;padding:8px 10px;border:1px dashed #FACC15;
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
   <div class="card">
-    <div class="top-link">
-      Already have an account? <a href="/login">Log in</a>.
-    </div>
-    <h1>Create your PatternCraft.app account</h1>
+    <div class="free-chip"><span class="dot"></span> Free account · one pattern included</div>
+    <h1>Create your free PatternCraft.app account</h1>
     <p class="muted">
-      Every new account includes <strong>one free pattern</strong>. Use it to test your first project, then upgrade when you’re ready.
+      Sign up once and your patterns stay attached to your email. Every new account includes
+      <strong>one full pattern</strong> you can generate, save, and return to under <em>My patterns</em>.
     </p>
     <ul>
-      <li>Use an email you check regularly.</li>
-      <li>Choose a password you’ll remember.</li>
+      <li>Use an email you actually check — we’ll send your account notices there.</li>
+      <li>Passwords are private and hashed; we never store them in plain text.</li>
     </ul>
     <form method="POST" action="/signup">
       <label>Email
@@ -1435,8 +1287,12 @@ SIGNUP_HTML = r"""
       <div class="msg">{{ message }}</div>
     {% endif %}
     <p class="muted" style="margin-top:10px;">
-      You can manage your patterns anytime under <strong>My patterns</strong>.
+      Already have an account? <a href="/login">Log in here</a>.
     </p>
+    <div class="disclaimer">
+      By creating an account, you agree that PatternCraft.app may send a short monthly email with
+      new pattern ideas and updates. You can unsubscribe at any time.
+    </div>
   </div>
 </div>
 </body>
@@ -1451,50 +1307,37 @@ LOGIN_HTML = r"""
   <title>Log in — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{margin:0;background:#FFF9E6;font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#111827}
-    .wrap{max-width:520px;margin:0 auto;padding:32px 16px 40px}
+    body{margin:0;background:#FFFDF2;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#1F2933;}
+    .wrap{max-width:520px;margin:0 auto;padding:40px 16px 46px;}
     .card{
-      background:#fff;
-      border-radius:16px;
-      border:1px solid #f4e4ae;
-      padding:22px;
-      box-shadow:0 12px 30px rgba(148,131,68,.3);
+      background:#FFFFFF;border-radius:18px;border:1px solid #F4E5A9;
+      padding:22px;box-shadow:0 16px 40px rgba(15,23,42,.18);
     }
-    h1{margin:0 0 10px;font-size:1.6rem}
-    .muted{font-size:13px;color:#6b7280}
-    label{display:block;font-size:13px;margin-top:12px}
+    h1{margin:0 0 8px;font-size:1.7rem;}
+    .muted{font-size:13px;color:#6B7280;}
+    label{display:block;font-size:13px;margin-top:12px;}
     input{
-      width:100%;margin-top:4px;padding:9px 11px;border-radius:10px;
-      border:1px solid #e5e7eb;font-size:14px;
+      width:100%;margin-top:4px;padding:9px 11px;border-radius:11px;
+      border:1px solid #E5E7EB;font-size:14px;
     }
     input:focus{
-      outline:none;border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.6);
+      outline:none;border-color:#F59E0B;box-shadow:0 0 0 1px rgba(245,158,11,.4);
     }
     .pill{
-      margin-top:14px;padding:11px 22px;border-radius:999px;
-      border:none;background:#f59e0b;color:#1f2933;
+      margin-top:16px;padding:10px 22px;border-radius:999px;
+      border:none;background:linear-gradient(135deg,#FACC15,#F97316);color:#1F2933;
       font-size:14px;font-weight:700;cursor:pointer;
-      box-shadow:0 8px 20px rgba(245,158,11,.5);
-      width:100%;
+      box-shadow:0 12px 30px rgba(217,119,6,.45);
+      display:inline-flex;align-items:center;justify-content:center;
     }
-    .pill:hover{
-      transform:translateY(-1px);
-      box-shadow:0 12px 26px rgba(245,158,11,.6);
-      background:#c26e00;color:#fff;
-    }
-    .pill-ghost{
-      margin-top:10px;
-      background:#fff;
-      color:#92400e;
-      border:1px solid #facc15;
-      box-shadow:none;
-    }
-    .pill-ghost:hover{
-      box-shadow:0 8px 18px rgba(148,131,68,.35);
-    }
-    .msg{margin-top:10px;font-size:13px;color:#b91c1c}
-    a{color:#1d4ed8;text-decoration:none;}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 15px 36px rgba(217,119,6,.52);}
+    .msg{margin-top:10px;font-size:13px;color:#B91C1C;}
+    a{color:#C97700;text-decoration:none;}
     a:hover{text-decoration:underline;}
+    .alt{
+      margin-top:12px;padding-top:10px;border-top:1px solid #F4E5A9;
+      font-size:13px;color:#6B7280;
+    }
   </style>
 </head>
 <body>
@@ -1502,7 +1345,7 @@ LOGIN_HTML = r"""
   <div class="card">
     <h1>Log in to PatternCraft.app</h1>
     <p class="muted">
-      Use the email and password you created when you first tried PatternCraft.app.
+      Use the email and password you created when you first generated a pattern.
     </p>
     <form method="POST" action="/login">
       <label>Email
@@ -1513,9 +1356,6 @@ LOGIN_HTML = r"""
       </label>
       <button class="pill" type="submit">Log in</button>
     </form>
-    <button class="pill pill-ghost" type="button" onclick="location.href='/signup'">
-      Create Free Account (1 pattern included)
-    </button>
     {% if message %}
       <div class="msg">{{ message }}</div>
     {% endif %}
@@ -1528,250 +1368,12 @@ LOGIN_HTML = r"""
         {% endif %}
       </p>
     {% endif %}
+    <div class="alt">
+      New to PatternCraft.app? <a href="/signup">Create a free account</a> —
+      includes one free pattern and access to monthly pattern ideas.
+    </div>
   </div>
 </div>
-</body>
-</html>
-"""
-
-PRICING_HTML = r"""
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PatternCraft • Pricing</title>
-<style>
-:root{
-  --fg:#111; --muted:#666; --accent:#f59e0b; --line:#eee; --card:#fffaf0;
-  --radius:16px; --wrap:1020px;
-}
-*{box-sizing:border-box} html,body{margin:0;padding:0}
-body{
-  font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
-  color:var(--fg);background:#FFF9E6;
-}
-.wrap{max-width:var(--wrap);margin:0 auto;padding:22px 16px 32px}
-header{position:sticky;top:0;background:#fff9e6;border-bottom:1px solid #f4e4ae;z-index:5}
-.brand{
-  display:flex;align-items:center;gap:8px;
-  font-weight:800;letter-spacing:.08em;text-transform:uppercase;font-size:14px;
-}
-.brand-mark{
-  width:22px;height:22px;border-radius:9px;
-  background:linear-gradient(135deg,#fbbf24,#f97316);
-  display:flex;align-items:center;justify-content:center;
-  font-size:11px;color:#fff;
-}
-.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.btn{
-  display:inline-block;padding:9px 16px;border-radius:999px;
-  border:1px solid var(--accent);background:var(--accent);color:#1f2933;
-  text-decoration:none;font-weight:700;cursor:pointer;font-size:13px;
-}
-.btn.ghost{background:#fff;color:#92400e;border-color:#facc15}
-.btn:hover{
-  background:#c26e00;color:#fff;border-color:#c26e00;
-}
-.btn.ghost:hover{
-  box-shadow:0 6px 18px rgba(148,131,68,.35);
-}
-.cards{
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
-  gap:16px;margin-top:16px;
-}
-.card{
-  background:var(--card);border:1px solid #f4e4ae;border-radius:var(--radius);padding:16px;
-  display:flex;flex-direction:column;justify-content:space-between;
-}
-.card h3{margin:0 0 6px}
-.price{font-size:24px;font-weight:800;margin:4px 0}
-.small{font-size:13px;color:var(--muted)}
-.list{margin:8px 0 12px;padding-left:18px;font-size:13px;color:#4b5563}
-.badge{
-  display:inline-block;background:#fef3c7;color:#92400e;border-radius:999px;
-  padding:4px 12px;font-size:12px;font-weight:600;margin-bottom:6px;
-  border:1px solid #facc15;
-}
-.notice{
-  margin-top:10px;padding:10px 12px;border-radius:10px;
-  background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
-  font-size:13px;
-}
-footer{border-top:1px solid #f4e4ae;margin-top:24px;font-size:12px;color:#6b7280}
-.steps{
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-  gap:16px;
-  margin-top:16px;
-}
-.step-card{
-  background:#fff;
-  border:1px solid #f4e4ae;
-  border-radius:var(--radius);
-  padding:16px;
-  font-size:13px;
-}
-.step-num{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  width:26px;height:26px;
-  border-radius:999px;
-  background:#f59e0b;
-  color:#1f2933;
-  font-size:14px;
-  font-weight:700;
-  margin-bottom:8px;
-}
-@media (max-width:700px){ .cards{grid-template-columns:1fr} }
-</style>
-</head>
-<body>
-<header>
-  <div class="wrap row" style="justify-content:space-between">
-    <div class="brand">
-      <div class="brand-mark">PC</div>
-      <span>PatternCraft.app</span>
-    </div>
-    <nav class="row">
-      <a class="btn ghost" href="/">Tool</a>
-      <a class="btn" href="/pricing">Pricing</a>
-      <a class="btn ghost" href="/patterns">My patterns</a>
-    </nav>
-  </div>
-</header>
-
-<section class="wrap" id="plans">
-  <div class="badge">Simple, transparent pricing</div>
-  <h1>Choose the plan that fits your stitching</h1>
-  <p class="small">Start with a single pattern, save with a pack, or go unlimited.</p>
-
-  {% if message %}
-  <div class="notice">{{ message }}</div>
-  {% endif %}
-
-  <div class="cards">
-    <!-- Single Pattern -->
-    <div class="card">
-      <div>
-        <h3>Single Pattern</h3>
-        <div class="price">$25</div>
-        <p class="small">Single pattern and legend. Use whenever.</p>
-        <ul class="list">
-          <li>1 professional pattern conversion</li>
-          <li>Detailed legend included</li>
-          <li>High-resolution grid output</li>
-          <li>Use your pattern whenever you like</li>
-        </ul>
-      </div>
-      <div>
-        <form method="POST" action="/checkout">
-          <input type="hidden" name="plan" value="single">
-          <button class="btn" type="submit">Buy Single</button>
-        </form>
-        <p class="small" style="margin-top:6px;">Best for one-off projects or trying PatternCraft.app.</p>
-      </div>
-    </div>
-
-    <!-- 10-Pattern Pack -->
-    <div class="card">
-      <div>
-        <h3>10-Pattern Pack</h3>
-        <div class="price">$60</div>
-        <p class="small">Great for consistent hobby use.</p>
-        <ul class="list">
-          <li>10 pattern conversions</li>
-          <li>Credits never expire</li>
-          <li>Includes all export formats</li>
-          <li>Premium palette options</li>
-        </ul>
-      </div>
-      <div>
-        <form method="POST" action="/checkout">
-          <input type="hidden" name="plan" value="pack10">
-          <button class="btn ghost" type="submit">Buy 10-Pack</button>
-        </form>
-        <p class="small" style="margin-top:6px;">Save big vs buying singles.</p>
-      </div>
-    </div>
-
-    <!-- 3-Month Unlimited -->
-    <div class="card">
-      <div>
-        <h3>3-Month Unlimited</h3>
-        <div class="price">$75 / 3 months</div>
-        <p class="small">Recurring every 3 months until you cancel.</p>
-        <ul class="list">
-          <li>Unlimited pattern conversions</li>
-          <li>Higher-resolution output</li>
-          <li>Advanced color tools</li>
-          <li>Priority processing</li>
-          <li>All export formats + templates</li>
-        </ul>
-      </div>
-      <div>
-        <form method="POST" action="/checkout">
-          <input type="hidden" name="plan" value="unlimited_3m">
-          <button class="btn ghost" type="submit">Start 3-Month Unlimited</button>
-        </form>
-        <p class="small" style="margin-top:6px;">Perfect for focused projects or seasons.</p>
-      </div>
-    </div>
-
-    <!-- Annual Unlimited -->
-    <div class="card">
-      <div>
-        <h3>Annual Unlimited</h3>
-        <div class="price">$99 / year</div>
-        <p class="small">Unlimited patterns all year.</p>
-        <ul class="list">
-          <li>Unlimited pattern conversions</li>
-          <li>4× resolution for large projects</li>
-          <li>Advanced color tools</li>
-          <li>Priority processing</li>
-          <li>All export formats + templates</li>
-        </ul>
-      </div>
-      <div>
-        <form method="POST" action="/checkout">
-          <input type="hidden" name="plan" value="annual">
-          <button class="btn ghost" type="submit">Go Annual Unlimited</button>
-        </form>
-        <p class="small" style="margin-top:6px;">Best value if you stitch more than 4 patterns a year.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="wrap">
-  <h2>How PatternCraft.app works</h2>
-  <p class="small">From photo to stitch-ready pattern in three simple steps.</p>
-  <div class="steps">
-    <div class="step-card">
-      <div class="step-num">1</div>
-      <h3>Select a plan</h3>
-      <p>Start with a single pattern, a pack, or unlimited access. Every account begins with one free pattern.</p>
-    </div>
-    <div class="step-card">
-      <div class="step-num">2</div>
-      <h3>Upload & choose settings</h3>
-      <p>Upload a photo or artwork, set stitch width, fabric count, and colors. PatternCraft builds a clean grid and legend.</p>
-    </div>
-    <div class="step-card">
-      <div class="step-num">3</div>
-      <h3>Download & stitch</h3>
-      <p>Download your pattern ZIP, print the grid and legend, or import files into your own tools. Your patterns are saved under <strong>My patterns</strong>.</p>
-    </div>
-  </div>
-</section>
-
-<footer class="wrap">
-  <div class="row" style="justify-content:space-between">
-    <div>© PatternCraft.app</div>
-    <div><a href="/" class="btn ghost">Back to tool</a></div>
-  </div>
-</footer>
 </body>
 </html>
 """
@@ -1781,82 +1383,82 @@ PATTERNS_HTML = r"""
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>My patterns — PatternCraft.app</title>
+  <title>My Patterns — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{
-      margin:0;
-      background:#FFF9E6;
-      font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
-      color:#111827;
-    }
-    .wrap{max-width:1020px;margin:0 auto;padding:22px 16px 40px}
+    body{margin:0;background:#FFFDF2;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#1F2933;}
+    .wrap{max-width:1100px;margin:0 auto;padding:26px 18px 46px;}
     .topbar{
       display:flex;align-items:center;justify-content:space-between;
-      margin-bottom:16px;
+      margin-bottom:18px;
     }
     .brand{
       display:flex;align-items:center;gap:8px;
-      font-weight:800;font-size:14px;letter-spacing:.08em;text-transform:uppercase;
+      font-weight:900;font-size:20px;letter-spacing:.05em;text-transform:uppercase;
     }
     .brand-mark{
-      width:22px;height:22px;border-radius:9px;
-      background:linear-gradient(135deg,#fbbf24,#f97316);
+      width:26px;height:26px;border-radius:9px;
+      background:linear-gradient(135deg,#FACC15,#F97316);
       display:flex;align-items:center;justify-content:center;
-      font-size:11px;color:#fff;
+      font-size:14px;font-weight:800;color:#1F2933;
     }
-    a{color:#1d4ed8;text-decoration:none;}
+    .top-links{font-size:13px;color:#4B5563;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+    a{color:#C97700;text-decoration:none;}
     a:hover{text-decoration:underline;}
-    h1{margin:0 0 8px;font-size:1.6rem}
-    .muted{font-size:13px;color:#6b7280}
+    h1{margin:0 0 6px;font-size:1.6rem;}
+    .muted{font-size:13px;color:#6B7280;margin:0 0 16px;}
+
     .grid{
       display:grid;
-      grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+      grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
       gap:16px;
-      margin-top:16px;
     }
     .card{
-      background:#fff;
-      border-radius:16px;
-      border:1px solid #f4e4ae;
-      padding:14px;
-      box-shadow:0 8px 22px rgba(148,131,68,.25);
-      display:flex;
-      flex-direction:column;
-      gap:8px;
+      background:#FFFFFF;border-radius:16px;border:1px solid #F4E5A9;
+      padding:14px 14px 16px;
+      box-shadow:0 10px 26px rgba(15,23,42,.12);
+      display:flex;flex-direction:column;gap:8px;
     }
-    .preview{
-      background:#f9fafb;
+    .card h2{
+      margin:0;font-size:14px;font-weight:700;
+      display:flex;justify-content:space-between;align-items:center;
+    }
+    .badge{
+      font-size:11px;padding:3px 8px;border-radius:999px;
+      background:#FEF3C7;color:#92400E;border:1px solid #FDE68A;
+      text-transform:uppercase;letter-spacing:.08em;font-weight:700;
+    }
+    .meta{font-size:11px;color:#9CA3AF;}
+    .pattern-preview{
+      margin-top:6px;
       border-radius:12px;
+      border:1px solid #E5E7EB;
+      background:#F9FAFB;
       overflow:hidden;
-      border:1px solid #e5e7eb;
       max-height:220px;
+      display:flex;align-items:center;justify-content:center;
     }
-    .preview img{
-      width:100%;
-      height:auto;
-      display:block;
+    .pattern-preview img{
+      display:block;width:100%;height:auto;
+      object-fit:contain;
     }
-    .meta{
-      font-size:12px;
-      color:#4b5563;
+    .actions{
+      margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;
     }
-    .meta span{display:inline-block;margin-right:6px;margin-bottom:2px;}
-    .pill{
-      padding:8px 16px;border-radius:999px;
-      border:none;background:#f59e0b;color:#1f2933;
-      font-size:13px;font-weight:700;cursor:pointer;
-      box-shadow:0 6px 18px rgba(245,158,11,.5);
-      text-align:center;
-      display:inline-block;
+    .pill-small{
+      display:inline-flex;align-items:center;justify-content:center;
+      padding:7px 14px;border-radius:999px;border:none;
+      font-size:12px;font-weight:600;cursor:pointer;
+      background:#FACC15;color:#1F2933;
     }
-    .pill:hover{
-      transform:translateY(-1px);
-      box-shadow:0 10px 24px rgba(245,158,11,.6);
-      background:#c26e00;color:#fff;
+    .pill-small.secondary{
+      background:#FFFFFF;border:1px solid #E5E7EB;color:#111827;
     }
-    .top-links{font-size:13px;color:#4b5563}
-    .top-links a{margin-left:10px;}
+    .pill-small:hover{filter:brightness(0.97);}
+    .empty{
+      margin-top:12px;padding:12px;border-radius:12px;
+      background:#FFFBEB;border:1px dashed #FACC15;font-size:13px;color:#92400E;
+    }
   </style>
 </head>
 <body>
@@ -1864,121 +1466,52 @@ PATTERNS_HTML = r"""
   <div class="topbar">
     <div class="brand">
       <div class="brand-mark">PC</div>
-      <span>PatternCraft.app</span>
+      <div>PatternCraft.app</div>
     </div>
     <div class="top-links">
-      <a href="/">Tool</a>
-      <a href="/pricing">Pricing</a>
-      <a href="/patterns">My patterns</a>
-      {% if user %}
-        · {{ user.email }}
-        · <a href="/logout">Sign out</a>
-      {% endif %}
+      <span>Signed in as {{ user.email }}</span>
+      · <a href="/">Back to tool</a>
+      · <a href="/logout">Sign out</a>
     </div>
   </div>
 
   <h1>My patterns</h1>
   <p class="muted">
-    Each time you generate a pattern, it’s saved here with a preview, details, and a fresh download link.
+    These are the patterns you’ve generated with PatternCraft.app. Open a grid to print, view its legend,
+    or download the original ZIP again.
   </p>
 
-  {% if patterns %}
-  <div class="grid">
-    {% for p in patterns %}
-    <div class="card">
-      <div class="preview">
-        {% if p.preview_file %}
-          <img src="/pattern/preview/{{ p.id }}" alt="Pattern preview {{ p.name }}">
-        {% else %}
-          <div style="padding:40px 12px;text-align:center;font-size:12px;color:#9ca3af;">
-            No preview available for this pattern.
-          </div>
-        {% endif %}
-      </div>
-      <div style="font-size:13px;font-weight:600;margin-top:4px;">
-        {{ p.name or ('Pattern ' ~ p.id[:8]) }}
-      </div>
-      <div class="meta">
-        <span>{{ p.type|default('cross')|capitalize }}</span>
-        {% if p.stitches_w and p.stitches_h %}
-          <span>{{ p.stitches_w }} × {{ p.stitches_h }} stitches</span>
-        {% endif %}
-        {% if p.colors %}
-          <span>{{ p.colors }} colors</span>
-        {% endif %}
-        {% if p.created_at %}
-          <span>Created {{ p.created_at[:10] }}</span>
-        {% endif %}
-      </div>
-      <div>
-        <a class="pill" href="/pattern/download/{{ p.id }}">Download pattern ZIP</a>
-      </div>
+  {% if not patterns %}
+    <div class="empty">
+      No patterns yet. Once you generate a pattern, it will appear here so you can revisit and print it any time.
     </div>
-    {% endfor %}
-  </div>
   {% else %}
-  <p class="muted" style="margin-top:12px;">
-    You haven’t generated a pattern yet. Go to the <a href="/">tool</a> to create your first pattern (your account includes one free pattern).
-  </p>
+    <div class="grid">
+      {% for p in patterns %}
+        <div class="card">
+          <h2>
+            <span>{{ p.title or ("Pattern " ~ loop.index) }}</span>
+            <span class="badge">{{ p.ptype|upper }}</span>
+          </h2>
+          <div class="meta">
+            Created {{ p.created_at }}
+          </div>
+          <div class="pattern-preview">
+            <img src="/patterns/{{ p.id }}/grid" alt="Pattern preview">
+          </div>
+          <div class="actions">
+            <a class="pill-small" href="/patterns/{{ p.id }}/download">Download ZIP</a>
+            <a class="pill-small secondary" href="/patterns/{{ p.id }}/legend" target="_blank">View legend</a>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
   {% endif %}
 </div>
 </body>
 </html>
 """
 
-SUCCESS_HTML = r"""
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Payment successful — PatternCraft.app</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    body{
-      margin:0;
-      font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;
-      background:#FFF9E6;
-      color:#111827;
-    }
-    .wrap{
-      max-width:520px;
-      margin:0 auto;
-      padding:32px 16px 40px;
-    }
-    .card{
-      background:#fff;
-      border-radius:16px;
-      border:1px solid #f4e4ae;
-      padding:24px;
-      box-shadow:0 12px 30px rgba(148,131,68,.3);
-    }
-    h1{margin:0 0 10px;font-size:1.7rem}
-    p{margin:6px 0;font-size:14px;color:#4b5563}
-    a{
-      color:#1d4ed8;
-      text-decoration:none;
-      font-weight:600;
-    }
-    a:hover{text-decoration:underline;}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h1>Payment received</h1>
-      <p>Thank you{% if user %}, {{ user.email }}{% endif %}. Your PatternCraft.app plan has been updated.</p>
-      <p>You can go back to the tool and start generating patterns right away. If your unlimited or credits plan looks unchanged, refresh the page and try generating a pattern.</p>
-      <p style="margin-top:14px;">
-        <a href="/">← Back to PatternCraft.app</a> · <a href="/patterns">View my patterns</a>
-      </p>
-    </div>
-  </div>
-</body>
-</html>
-"""
-
-# ---------------------- MAIN -------------------------------------
-
 if __name__ == "__main__":
+    # For local testing; on Render you use gunicorn "app:app"
     app.run(debug=True)
-
