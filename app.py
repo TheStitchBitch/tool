@@ -820,7 +820,7 @@ def convert():
         ptype = request.form.get("ptype", "cross")
         stitch_style = request.form.get("stitch_style", "full")
 
-        # Higher limits for subscription users (match “higher resolution / advanced color tools” copy)
+        # Higher limits for subscription users
         width_limit = 400
         color_limit = 60
         if subscription in ("unlimited_3m", "unlimited_year"):
@@ -924,7 +924,7 @@ def convert():
             }
             z.writestr("meta.json", json.dumps(pattern_meta, indent=2))
 
-            # Preview image for on-site viewing: clean art-style, no grid / watermark
+            # Clean preview image (no watermark/blur)
             preview_img = quant.resize((sx * CELL_PX, sy * CELL_PX), Image.Resampling.NEAREST)
             buf_preview = io.BytesIO()
             preview_img.save(buf_preview, format="PNG")
@@ -992,7 +992,7 @@ def convert():
     )
 
 
-# ------------- INLINE HTML TEMPLATES -------------
+# ------------- INLINE HTML TEMPLATES (PASTEL YELLOW THEME) -------------
 
 HOMEPAGE_HTML = r"""<!doctype html>
 <html lang="en">
@@ -1004,16 +1004,16 @@ HOMEPAGE_HTML = r"""<!doctype html>
   <link rel="icon" href="/static/patterncraft-mark.svg">
   <style>
     :root{
-      --bg:#0f172a;
-      --fg:#111827;
+      --bg:#FFF8DC;
+      --fg:#1f2933;
       --muted:#6b7280;
       --line:#e5e7eb;
       --radius:18px;
-      --accent:#ec4899;
-      --accent-soft:#fdf2ff;
-      --accent-strong:#be185d;
+      --accent:#f59e0b;
+      --accent-soft:#FFF6CE;
+      --accent-strong:#d97706;
       --pill:#f97316;
-      --shell:#020617;
+      --shell:#FFF1BF;
     }
     *{box-sizing:border-box;}
     body{
@@ -1021,9 +1021,9 @@ HOMEPAGE_HTML = r"""<!doctype html>
       font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
       color:var(--fg);
       background:
-        radial-gradient(circle at top left,#f9a8d4 0,#eef2ff 38%,transparent 60%),
-        radial-gradient(circle at bottom right,#a5b4fc 0,#fdf2ff 40%,transparent 65%),
-        linear-gradient(135deg,#020617,#0f172a);
+        radial-gradient(circle at top left,#FFE9B3 0,#FFFDF5 40%,transparent 65%),
+        radial-gradient(circle at bottom right,#FFD6E0 0,#FFF7E0 45%,transparent 70%),
+        linear-gradient(135deg,#FFF7E5,#FFFDF7);
     }
     a{color:#2563eb;text-decoration:none;}
     a:hover{text-decoration:underline;}
@@ -1036,34 +1036,41 @@ HOMEPAGE_HTML = r"""<!doctype html>
     }
     .brand{
       display:flex;align-items:center;gap:8px;
-      font-weight:800;font-size:20px;letter-spacing:.06em;text-transform:uppercase;color:#f9fafb;
+      font-weight:800;font-size:20px;letter-spacing:.06em;text-transform:uppercase;color:#92400e;
     }
     .brand-mark{
-      width:24px;height:24px;border-radius:9px;
-      background:conic-gradient(from 200deg,var(--accent),#4f46e5,#22c55e,var(--accent));
+      width:26px;height:26px;border-radius:9px;
+      background:conic-gradient(from 200deg,#f97316,#fbbf24,#f472b6,#f97316);
       display:flex;align-items:center;justify-content:center;
-      color:#0f172a;font-size:12px;font-weight:800;
-      box-shadow:0 0 0 1px rgba(15,23,42,.4);
+      color:#78350f;font-size:12px;font-weight:800;
+      box-shadow:0 0 0 1px rgba(148,81,8,.4);
     }
     .top-links{
-      font-size:13px;color:#e5e7eb;
+      font-size:13px;color:#6b7280;
     }
-    .top-links a{margin-left:8px;color:#e5e7eb;}
-    .top-links a:hover{color:#fff;}
+    .top-links a{margin-left:8px;color:#4b5563;}
+    .top-links a:hover{color:#111827;}
     .chip{
       display:inline-flex;align-items:center;gap:6px;
-      padding:3px 9px;border-radius:999px;
-      background:rgba(15,23,42,.85);border:1px solid rgba(148,163,184,.8);
-      font-size:11px;color:#e5e7eb;text-transform:uppercase;letter-spacing:.09em;
+      padding:4px 10px;border-radius:999px;
+      background:#FFFCF2;border:1px solid rgba(248,191,36,.5);
+      font-size:11px;color:#92400e;text-transform:uppercase;letter-spacing:.09em;
     }
     .chip-dot{width:7px;height:7px;border-radius:999px;background:#22c55e}
     .card{
-      background:rgba(248,250,252,.96);
+      background:#FFFEFB;
       border-radius:var(--radius);
-      border:1px solid rgba(148,163,184,.4);
-      box-shadow:0 18px 45px rgba(15,23,42,.55);
+      border:1px solid rgba(251,191,36,.4);
+      box-shadow:0 14px 34px rgba(148,81,8,.18);
       padding:18px 18px 18px;
-      backdrop-filter:blur(18px);
+    }
+    .section-card{
+      background:#FFFEFB;
+      border-radius:var(--radius);
+      border:1px solid rgba(251,191,36,.4);
+      padding:18px;
+      box-shadow:0 14px 32px rgba(148,81,8,.16);
+      margin-bottom:18px;
     }
     .hero{
       display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);
@@ -1072,89 +1079,68 @@ HOMEPAGE_HTML = r"""<!doctype html>
     .hero-tagline{color:var(--muted);max-width:430px;font-size:14px;}
     .muted{color:var(--muted);font-size:13px}
     .pill{
-      padding:10px 18px;border-radius:999px;
+      padding:11px 22px;border-radius:999px;
       background:linear-gradient(135deg,var(--pill),#ea580c);
       color:#fff;border:none;cursor:pointer;
-      font-size:14px;font-weight:600;letter-spacing:.02em;
-      box-shadow:0 8px 24px rgba(248,113,22,.5);
+      font-size:15px;font-weight:650;letter-spacing:.02em;
+      box-shadow:0 10px 26px rgba(248,113,22,.55);
       transition:transform .08s,box-shadow .08s,background .08s;
       display:inline-flex;align-items:center;gap:6px;
       text-decoration:none;
     }
     .pill:hover{
       transform:translateY(-1px);
-      box-shadow:0 10px 30px rgba(248,113,22,.6);
+      box-shadow:0 13px 32px rgba(248,113,22,.65);
     }
     .pill-secondary{
-      background:#020617;
-      color:#e5e7eb;
-      border:1px solid rgba(148,163,184,.7);
-      box-shadow:0 6px 18px rgba(15,23,42,.7);
+      background:#FFFDF3;
+      color:#92400e;
+      border:2px solid #f97316;
+      box-shadow:0 8px 22px rgba(234,88,12,.25);
     }
     .pill-secondary:hover{
-      background:#0b1120;
-      box-shadow:0 10px 26px rgba(15,23,42,.9);
+      background:#FFFBEB;
     }
     .pill-ready{
       background:#16a34a;
-      box-shadow:0 8px 24px rgba(22,163,74,.6);
+      box-shadow:0 10px 26px rgba(22,163,74,.6);
     }
     .hero-cta-row{
-      display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center;
+      display:flex;gap:12px;margin-top:14px;flex-wrap:wrap;align-items:center;
     }
-    .hero-note{font-size:12px;color:#e5e7eb;margin-top:8px;}
-    .hero-note a{color:#bfdbfe;}
-    .hero-note a:hover{color:#fff;}
+    .hero-note{
+      font-size:12px;color:#6b7280;margin-top:8px;
+    }
     .badge-row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
     .badge{
-      font-size:11px;padding:3px 8px;border-radius:999px;
-      background:rgba(15,23,42,.85);color:#e5e7eb;border:1px solid rgba(148,163,184,.7);
+      font-size:11px;padding:5px 10px;border-radius:999px;
+      background:#FEF3C7;color:#92400e;border:1px solid #FBBF24;
     }
 
     .demo-shell{
-      background:var(--shell);
+      background:#FFF7CF;
       border-radius:26px;
-      border:1px solid rgba(15,23,42,.9);
-      padding:10px 8px 10px;
-      box-shadow:0 20px 40px rgba(15,23,42,.9);
+      border:1px solid rgba(248,191,36,.8);
+      padding:12px 10px 12px;
+      box-shadow:0 16px 36px rgba(146,64,14,.3);
       max-width:360px;
       margin:0 auto;
     }
-    .demo-header{
-      display:flex;justify-content:space-between;align-items:center;
-      color:#9ca3af;font-size:11px;padding:0 8px 8px;
-    }
-    .demo-dots{display:flex;gap:4px;}
-    .demo-dot{
-      width:6px;height:6px;border-radius:999px;
-      background:rgba(148,163,184,.9);
-    }
     .demo-screen{
-      border-radius:18px;
+      border-radius:20px;
       overflow:hidden;
-      background:#020617;
-      border:1px solid rgba(30,64,175,.8);
+      background:#000;
+      border:1px solid rgba(248,191,36,.9);
       position:relative;
     }
     .demo-screen video{
       width:100%;display:block;
     }
-    .demo-caption{
-      font-size:11px;color:#e5e7eb;
-      margin-top:8px;text-align:center;
-    }
 
-    .section-card{
-      background:rgba(248,250,252,.98);
-      border-radius:var(--radius);
-      border:1px solid rgba(148,163,184,.4);
-      padding:18px;
-      box-shadow:0 14px 32px rgba(15,23,42,.45);
-      margin-bottom:18px;
-    }
     .why-title{
       font-size:1.05rem;
       margin:0 0 4px;
+      color:#78350f;
     }
     .why-sub{font-size:13px;color:var(--muted);margin-bottom:10px;}
     .why-list{margin:0;padding-left:20px;font-size:13px;color:#111827;}
@@ -1162,23 +1148,23 @@ HOMEPAGE_HTML = r"""<!doctype html>
 
     .make-layout{display:grid;gap:18px;grid-template-columns:minmax(0,1.35fr);}
     .file{
-      border:2px dashed rgba(129,140,248,1);
+      border:2px dashed rgba(234,179,8,1);
       border-radius:18px;
-      padding:16px 14px;
+      padding:18px 16px;
       display:flex;align-items:center;gap:11px;
       cursor:pointer;
-      background:rgba(239,246,255,.96);
+      background:var(--accent-soft);
       transition:background .15s,border-color .15s,transform .1s,box-shadow .1s;
     }
     .file:hover{
-      background:#e0ecff;border-color:#4f46e5;
+      background:#FFE8AC;border-color:#f59e0b;
       transform:translateY(-1px);
-      box-shadow:0 8px 22px rgba(59,130,246,.45);
+      box-shadow:0 10px 26px rgba(234,179,8,.45);
     }
     .file-ready{
       background:#dcfce7;
       border-color:#16a34a;
-      box-shadow:0 8px 22px rgba(22,163,74,.55);
+      box-shadow:0 10px 26px rgba(22,163,74,.55);
     }
     .file input{display:none}
     .file-label-main{font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:.08em}
@@ -1189,19 +1175,19 @@ HOMEPAGE_HTML = r"""<!doctype html>
     }
     .free-dot{width:8px;height:8px;border-radius:999px;background:#10b981}
 
-    fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0}
-    legend{font-size:13px;padding:0 4px}
+    fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0;background:#FFFEFA;}
+    legend{font-size:13px;padding:0 4px;color:#92400e;}
     .row{display:flex;flex-wrap:wrap;gap:12px}
     .row > label{flex:1 1 150px;font-size:13px}
     .row input,.row select{
-      width:100%;margin-top:3px;padding:6px 8px;border-radius:8px;
-      border:1px solid #cbd5f5;font-size:13px;
+      width:100%;margin-top:3px;padding:7px 9px;border-radius:8px;
+      border:1px solid #facc15;font-size:13px;background:#FFFEF5;
     }
     .row input:focus,.row select:focus{
-      outline:none;border-color:#4f46e5;box-shadow:0 0 0 1px rgba(79,70,229,.35);
+      outline:none;border-color:#f97316;box-shadow:0 0 0 1px rgba(248,148,30,.6);
     }
     label{font-size:13px}
-    .controls-note{font-size:11px;color:#94a3b8;margin-top:4px}
+    .controls-note{font-size:11px;color:#9ca3af;margin-top:4px}
     .hidden{display:none}
     .legal{
       font-size:11px;color:#9ca3af;margin-top:18px;text-align:center;
@@ -1271,24 +1257,11 @@ HOMEPAGE_HTML = r"""<!doctype html>
     </div>
 
     <div class="demo-shell">
-      <div class="demo-header">
-        <div class="demo-dots">
-          <div class="demo-dot"></div>
-          <div class="demo-dot"></div>
-          <div class="demo-dot"></div>
-        </div>
-        <div>Pattern preview</div>
-        <div style="font-size:10px;">PC</div>
-      </div>
       <div class="demo-screen">
         <!-- Put PC.APP.mp4 into static/PC.APP.mp4 on Render -->
         <video autoplay muted playsinline loop poster="/static/demo-poster.png">
           <source src="/static/PC.APP.mp4" type="video/mp4">
         </video>
-      </div>
-      <div class="demo-caption">
-        Picture in → pattern out. Short demo of selecting a plan, uploading a photo,
-        adjusting options, and downloading your finished grid.
       </div>
     </div>
   </div>
@@ -1389,7 +1362,7 @@ HOMEPAGE_HTML = r"""<!doctype html>
             </div>
           </fieldset>
 
-          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <div style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
             <button class="pill" id="generateBtn" type="submit">Generate pattern ZIP</button>
             <span class="muted">
               Your download includes grid.png, art.png, legend.csv, meta.json, and optional pattern.pdf or embroidery files.
@@ -1489,34 +1462,40 @@ SIGNUP_HTML = r"""<!doctype html>
   <title>Create your account — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{margin:0;background:#0f172a;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#e5e7eb}
+    body{
+      margin:0;
+      background:linear-gradient(135deg,#FFF7DF,#FFFDF5);
+      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;
+      color:#422006;
+    }
     .wrap{max-width:520px;margin:0 auto;padding:32px 16px 40px}
     .card{
-      background:rgba(15,23,42,.98);
-      border-radius:16px;border:1px solid #1f2937;
-      padding:22px;box-shadow:0 18px 40px rgba(0,0,0,.8);
+      background:#FFFEFB;
+      border-radius:18px;border:1px solid #FACC15;
+      padding:24px;box-shadow:0 16px 40px rgba(148,81,8,.2);
     }
-    h1{margin:0 0 10px;font-size:1.6rem;color:#f9fafb;}
-    .muted{font-size:13px;color:#9ca3af}
+    h1{margin:0 0 10px;font-size:1.7rem;color:#7c2d12;}
+    .muted{font-size:13px;color:#6b7280}
     label{display:block;font-size:13px;margin-top:12px}
     input[type="email"],input[type="password"]{
-      width:100%;margin-top:4px;padding:8px 10px;border-radius:10px;
-      border:1px solid #4b5563;font-size:14px;background:#020617;color:#e5e7eb;
+      width:100%;margin-top:4px;padding:9px 11px;border-radius:10px;
+      border:1px solid #FBBF24;font-size:14px;background:#FFFEF5;color:#422006;
     }
     input:focus{
-      outline:none;border-color:#6366f1;box-shadow:0 0 0 1px rgba(129,140,248,.55);
+      outline:none;border-color:#f97316;box-shadow:0 0 0 1px rgba(248,148,30,.7);
     }
     .pill{
-      margin-top:14px;padding:9px 18px;border-radius:999px;
+      margin-top:16px;padding:11px 22px;border-radius:999px;
       border:none;background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;
-      font-size:14px;font-weight:600;cursor:pointer;
-      box-shadow:0 7px 18px rgba(248,113,22,.45);
+      font-size:15px;font-weight:650;cursor:pointer;
+      box-shadow:0 10px 26px rgba(248,113,22,.55);
+      width:100%;
     }
-    .pill:hover{transform:translateY(-1px);box-shadow:0 10px 26px rgba(248,113,22,.65);}
-    .msg{margin-top:10px;font-size:13px;color:#fecaca}
-    a{color:#93c5fd;text-decoration:none;}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 13px 32px rgba(248,113,22,.7);}
+    .msg{margin-top:10px;font-size:13px;color:#b91c1c;background:#fee2e2;border-radius:10px;padding:8px 10px;}
+    a{color:#0369a1;text-decoration:none;}
     a:hover{text-decoration:underline;}
-    ul{font-size:13px;color:#9ca3af;padding-left:18px;margin-top:10px}
+    ul{font-size:13px;color:#6b7280;padding-left:18px;margin-top:10px}
   </style>
 </head>
 <body>
@@ -1541,7 +1520,7 @@ SIGNUP_HTML = r"""<!doctype html>
       <label>Confirm password
         <input type="password" name="confirm" required>
       </label>
-      <button class="pill" type="submit">Create account</button>
+      <button class="pill" type="submit">Create account · 1 pattern included</button>
     </form>
     {% if message %}
       <div class="msg">{{ message }}</div>
@@ -1561,33 +1540,57 @@ LOGIN_HTML = r"""<!doctype html>
   <title>Log in — PatternCraft.app</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{margin:0;background:#020617;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;color:#e5e7eb}
+    body{
+      margin:0;
+      background:linear-gradient(135deg,#FFF7DF,#FFFDF5);
+      font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;
+      color:#422006;
+    }
     .wrap{max-width:520px;margin:0 auto;padding:32px 16px 40px}
     .card{
-      background:rgba(15,23,42,.98);
-      border-radius:16px;border:1px solid #1f2937;
-      padding:22px;box-shadow:0 18px 40px rgba(0,0,0,.9);
+      background:#FFFEFB;
+      border-radius:18px;border:1px solid #FACC15;
+      padding:24px;box-shadow:0 16px 40px rgba(148,81,8,.2);
     }
-    h1{margin:0 0 10px;font-size:1.6rem;color:#f9fafb;}
-    .muted{font-size:13px;color:#9ca3af}
+    h1{margin:0 0 10px;font-size:1.7rem;color:#7c2d12;}
+    .muted{font-size:13px;color:#6b7280}
     label{display:block;font-size:13px;margin-top:12px}
     input{
-      width:100%;margin-top:4px;padding:8px 10px;border-radius:10px;
-      border:1px solid #4b5563;font-size:14px;background:#020617;color:#e5e7eb;
+      width:100%;margin-top:4px;padding:9px 11px;border-radius:10px;
+      border:1px solid #FBBF24;font-size:14px;background:#FFFEF5;color:#422006;
     }
     input:focus{
-      outline:none;border-color:#6366f1;box-shadow:0 0 0 1px rgba(129,140,248,.6);
+      outline:none;border-color:#f97316;box-shadow:0 0 0 1px rgba(248,148,30,.7);
     }
     .pill{
-      margin-top:14px;padding:9px 18px;border-radius:999px;
+      margin-top:14px;padding:11px 22px;border-radius:999px;
       border:none;background:linear-gradient(135deg,#4c51bf,#4338ca);color:#fff;
-      font-size:14px;font-weight:600;cursor:pointer;
-      box-shadow:0 7px 18px rgba(79,70,229,.55);
+      font-size:15px;font-weight:650;cursor:pointer;
+      box-shadow:0 10px 26px rgba(79,70,229,.55);
+      width:100%;
     }
-    .pill:hover{transform:translateY(-1px);box-shadow:0 10px 26px rgba(79,70,229,.75);}
-    .msg{margin-top:10px;font-size:13px;color:#fecaca}
-    a{color:#93c5fd;text-decoration:none;}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 13px 32px rgba(79,70,229,.7);}
+    .msg{margin-top:10px;font-size:13px;color:#b91c1c;background:#fee2e2;border-radius:10px;padding:8px 10px;}
+    a{color:#0369a1;text-decoration:none;}
     a:hover{text-decoration:underline;}
+    .cta-secondary{
+      display:inline-block;
+      margin-top:12px;
+      padding:11px 22px;
+      border-radius:999px;
+      border:none;
+      background:linear-gradient(135deg,#f97316,#ea580c);
+      color:#fff;
+      font-size:15px;
+      font-weight:650;
+      text-align:center;
+      text-decoration:none;
+      box-shadow:0 10px 26px rgba(248,113,22,.55);
+      width:100%;
+    }
+    .cta-secondary:hover{
+      box-shadow:0 13px 32px rgba(248,113,22,.7);
+    }
   </style>
 </head>
 <body>
@@ -1608,8 +1611,7 @@ LOGIN_HTML = r"""<!doctype html>
       <button class="pill" type="submit">Log in</button>
     </form>
     <a href="/signup"
-       class="pill"
-       style="display:inline-block;margin-top:10px;background:linear-gradient(135deg,#f97316,#ea580c);box-shadow:0 7px 18px rgba(248,113,22,.55);text-align:center;text-decoration:none;">
+       class="cta-secondary">
       Create free account · 1 pattern included
     </a>
     {% if message %}
@@ -1636,7 +1638,7 @@ PRICING_HTML = r"""<!doctype html>
 <title>PatternCraft • Pricing</title>
 <style>
 :root{
-  --fg:#0f172a; --muted:#6b7280; --accent:#ec4899; --line:#e5e7eb; --card:#f9fafb;
+  --fg:#422006; --muted:#6b7280; --accent:#f97316; --line:#e5e7eb; --card:#FFFEFB;
   --radius:16px; --wrap:1040px;
 }
 *{box-sizing:border-box} html,body{margin:0;padding:0}
@@ -1644,44 +1646,50 @@ body{
   font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
   color:var(--fg);
   background:
-    radial-gradient(circle at top left,#f9a8d4 0,#eef2ff 40%,transparent 60%),
-    radial-gradient(circle at bottom right,#a5b4fc 0,#fdf2ff 40%,transparent 65%),
-    linear-gradient(135deg,#020617,#0f172a);
+    radial-gradient(circle at top left,#FFE9B3 0,#FFFDF5 40%,transparent 65%),
+    radial-gradient(circle at bottom right,#FFD6E0 0,#FFF7E0 45%,transparent 70%),
+    linear-gradient(135deg,#FFF7E5,#FFFDF7);
 }
 .wrap{max-width:var(--wrap);margin:0 auto;padding:20px 14px 32px}
-header{position:sticky;top:0;background:#020617d9;border-bottom:1px solid rgba(148,163,184,.5);z-index:5;backdrop-filter:blur(10px);}
-.brand{font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#e5e7eb;font-size:13px;}
+header{
+  position:sticky;top:0;
+  background:#FFFBEBE6;
+  border-bottom:1px solid rgba(248,191,36,.6);
+  z-index:5;
+  backdrop-filter:blur(10px);
+}
+.brand{font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#92400e;font-size:13px;}
 .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .btn{
-  display:inline-block;padding:8px 15px;border-radius:999px;
-  border:1px solid var(--accent);background:var(--accent);color:#fff;
-  text-decoration:none;font-weight:600;cursor:pointer;font-size:13px;
+  display:inline-block;padding:10px 18px;border-radius:999px;
+  border:2px solid var(--accent);background:var(--accent);color:#fff;
+  text-decoration:none;font-weight:650;cursor:pointer;font-size:14px;
 }
-.btn.ghost{background:transparent;color:#f9a8d4;border-color:rgba(248,250,252,.5);}
-.btn.ghost:hover{background:rgba(15,23,42,.9);}
+.btn.ghost{background:#FFFDF5;color:#b45309;border-color:#f97316;}
+.btn.ghost:hover{background:#FFF7E0;}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:16px}
 .card{
-  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px 14px 16px;
-  box-shadow:0 16px 34px rgba(15,23,42,.45);
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 16px 18px;
+  box-shadow:0 16px 34px rgba(148,81,8,.18);
 }
-.card h3{margin:0 0 6px}
-.price{font-size:24px;font-weight:800;margin:4px 0}
+.card h3{margin:0 0 6px;color:#7c2d12;}
+.price{font-size:24px;font-weight:800;margin:4px 0;color:#b45309;}
 .small{font-size:13px;color:var(--muted)}
 .list{margin:8px 0 12px;padding-left:20px;font-size:13px}
 .badge{
-  display:inline-block;background:#fce7f3;color:#9d174d;border-radius:999px;
-  padding:4px 12px;font-size:12px;font-weight:600;margin-bottom:6px
+  display:inline-block;background:#FEF3C7;color:#92400e;border-radius:999px;
+  padding:5px 12px;font-size:12px;font-weight:600;margin-bottom:6px;border:1px solid #FBBF24;
 }
 .notice{
   margin-top:10px;padding:9px 11px;border-radius:10px;
   background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
   font-size:13px;
 }
-footer{border-top:1px solid rgba(148,163,184,.6);margin-top:24px;padding-top:10px;color:#cbd5f5;font-size:12px;}
-footer a{color:#e5e7eb;text-decoration:none;}
+footer{border-top:1px solid rgba(248,191,36,.8);margin-top:24px;padding-top:10px;color:#92400e;font-size:12px;}
+footer a{color:#92400e;text-decoration:none;}
 footer a:hover{text-decoration:underline;}
-.heading{color:#e5e7eb;margin:8px 0 4px;font-size:1.15rem;}
-.subhead{color:#cbd5f5;font-size:13px;margin:0 0 10px;}
+.heading{color:#7c2d12;margin:8px 0 4px;font-size:1.4rem;}
+.subhead{color:#6b7280;font-size:13px;margin:0 0 10px;}
 @media (max-width:700px){ .cards{grid-template-columns:1fr} }
 
 .steps{
@@ -1691,21 +1699,21 @@ footer a:hover{text-decoration:underline;}
   margin-top:16px;
 }
 .step-card{
-  background:rgba(15,23,42,.96);
-  border:1px solid rgba(148,163,184,.5);
+  background:#FFFEFB;
+  border:1px solid rgba(248,191,36,.7);
   border-radius:var(--radius);
   padding:14px;
-  color:#e5e7eb;
-  box-shadow:0 16px 32px rgba(15,23,42,.9);
+  color:#422006;
+  box-shadow:0 14px 30px rgba(148,81,8,.16);
 }
 .step-num{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  width:24px;height:24px;
+  width:26px;height:26px;
   border-radius:999px;
   background:#f97316;
-  color:#0f172a;
+  color:#fff;
   font-size:13px;
   font-weight:700;
   margin-bottom:6px;
@@ -1727,7 +1735,8 @@ footer a:hover{text-decoration:underline;}
 </header>
 
 <section class="wrap">
-  <h1 class="heading">Simple, transparent pricing</h1>
+  <span class="badge">Simple, transparent pricing</span>
+  <h1 class="heading">Choose the plan that fits your stitching</h1>
   <p class="subhead">Start with a single pattern, save with a pack, or go unlimited on a recurring plan.</p>
 
   {% if message %}
@@ -1865,8 +1874,8 @@ PATTERN_LIST_HTML = r"""<!doctype html>
     body{
       margin:0;
       font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
-      background:#020617;
-      color:#e5e7eb;
+      background:linear-gradient(135deg,#FFF7DF,#FFFDF5);
+      color:#422006;
     }
     .wrap{max-width:960px;margin:0 auto;padding:24px 14px 40px}
     .topbar{
@@ -1874,17 +1883,17 @@ PATTERN_LIST_HTML = r"""<!doctype html>
       margin-bottom:18px;
     }
     .brand{
-      font-weight:800;font-size:18px;letter-spacing:.12em;text-transform:uppercase;color:#f9fafb;
+      font-weight:800;font-size:18px;letter-spacing:.12em;text-transform:uppercase;color:#92400e;
     }
     .nav a{
-      color:#cbd5f5;
+      color:#6b7280;
       font-size:13px;
       margin-left:10px;
       text-decoration:none;
     }
-    .nav a:hover{text-decoration:underline;}
-    h1{margin:0 0 10px;font-size:1.5rem;color:#f9fafb;}
-    .muted{font-size:13px;color:#9ca3af}
+    .nav a:hover{text-decoration:underline;color:#111827;}
+    h1{margin:0 0 10px;font-size:1.5rem;color:#7c2d12;}
+    .muted{font-size:13px;color:#6b7280}
     .grid{
       display:flex;
       flex-direction:column;
@@ -1892,23 +1901,23 @@ PATTERN_LIST_HTML = r"""<!doctype html>
       margin-top:12px;
     }
     .card{
-      background:rgba(15,23,42,.98);
-      border-radius:14px;
-      border:1px solid #1f2937;
+      background:#FFFEFB;
+      border-radius:16px;
+      border:1px solid #FACC15;
       padding:12px 12px;
       display:flex;
       gap:12px;
-      box-shadow:0 14px 30px rgba(0,0,0,.85);
+      box-shadow:0 14px 30px rgba(148,81,8,.18);
     }
     .thumb{
       width:120px;
-      border-radius:10px;
+      border-radius:12px;
       overflow:hidden;
-      background:#020617;
+      background:#FFF7DF;
       display:flex;
       align-items:center;
       justify-content:center;
-      border:1px solid #111827;
+      border:1px solid #FACC15;
       flex-shrink:0;
     }
     .thumb img{
@@ -1917,7 +1926,7 @@ PATTERN_LIST_HTML = r"""<!doctype html>
     }
     .thumb-placeholder{
       font-size:11px;
-      color:#6b7280;
+      color:#9ca3af;
       padding:8px;
       text-align:center;
     }
@@ -1928,11 +1937,11 @@ PATTERN_LIST_HTML = r"""<!doctype html>
       font-size:14px;
       font-weight:600;
       margin-bottom:2px;
-      color:#f9fafb;
+      color:#7c2d12;
     }
     .meta{
       font-size:12px;
-      color:#9ca3af;
+      color:#6b7280;
       margin-bottom:4px;
     }
     .meta span{margin-right:8px;}
@@ -1945,35 +1954,35 @@ PATTERN_LIST_HTML = r"""<!doctype html>
     }
     .btn{
       display:inline-block;
-      padding:6px 10px;
+      padding:8px 12px;
       border-radius:999px;
       border:none;
       cursor:pointer;
       font-size:12px;
-      font-weight:600;
+      font-weight:650;
       text-decoration:none;
       text-align:center;
     }
     .btn-primary{
       background:#f97316;
-      color:#111827;
-      box-shadow:0 6px 18px rgba(248,113,22,.6);
+      color:#fff;
+      box-shadow:0 8px 22px rgba(248,113,22,.55);
     }
     .btn-primary:hover{
       background:#ea580c;
     }
     .btn-ghost{
-      background:transparent;
-      color:#e5e7eb;
-      border:1px solid #4b5563;
+      background:#FFFDF5;
+      color:#92400e;
+      border:1px solid #FACC15;
     }
     .btn-ghost:hover{
-      background:#111827;
+      background:#FFF7DF;
     }
     .empty{
       margin-top:16px;
       font-size:13px;
-      color:#9ca3af;
+      color:#6b7280;
     }
   </style>
 </head>
@@ -2056,8 +2065,8 @@ PATTERN_DETAIL_HTML = r"""<!doctype html>
     body{
       margin:0;
       font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
-      background:#020617;
-      color:#e5e7eb;
+      background:linear-gradient(135deg,#FFF7DF,#FFFDF5);
+      color:#422006;
     }
     .wrap{max-width:980px;margin:0 auto;padding:24px 14px 40px}
     .topbar{
@@ -2065,33 +2074,33 @@ PATTERN_DETAIL_HTML = r"""<!doctype html>
       margin-bottom:18px;
     }
     .brand{
-      font-weight:800;font-size:18px;letter-spacing:.12em;text-transform:uppercase;color:#f9fafb;
+      font-weight:800;font-size:18px;letter-spacing:.12em;text-transform:uppercase;color:#92400e;
     }
     .nav a{
-      color:#cbd5f5;
+      color:#6b7280;
       font-size:13px;
       margin-left:10px;
       text-decoration:none;
     }
-    .nav a:hover{text-decoration:underline;}
-    h1{margin:0 0 8px;font-size:1.4rem;color:#f9fafb;}
-    .meta{font-size:12px;color:#9ca3af;margin-bottom:10px;}
+    .nav a:hover{text-decoration:underline;color:#111827;}
+    h1{margin:0 0 8px;font-size:1.4rem;color:#7c2d12;}
+    .meta{font-size:12px;color:#6b7280;margin-bottom:10px;}
     .layout{
       display:grid;
       grid-template-columns:minmax(0,1.2fr) minmax(0,1.1fr);
       gap:16px;
     }
     .card{
-      background:rgba(15,23,42,.98);
+      background:#FFFEFB;
       border-radius:16px;
-      border:1px solid #1f2937;
+      border:1px solid #FACC15;
       padding:14px;
-      box-shadow:0 16px 32px rgba(0,0,0,.85);
+      box-shadow:0 16px 32px rgba(148,81,8,.18);
     }
     .preview{
-      background:#020617;
+      background:#FFF7DF;
       border-radius:12px;
-      border:1px solid #111827;
+      border:1px solid #FACC15;
       padding:6px;
       max-height:520px;
       overflow:auto;
@@ -2108,53 +2117,53 @@ PATTERN_DETAIL_HTML = r"""<!doctype html>
     }
     .btn{
       display:inline-block;
-      padding:7px 12px;
+      padding:8px 14px;
       border-radius:999px;
       border:none;
       cursor:pointer;
       font-size:12px;
-      font-weight:600;
+      font-weight:650;
       text-decoration:none;
       text-align:center;
     }
     .btn-primary{
       background:#f97316;
-      color:#111827;
-      box-shadow:0 6px 18px rgba(248,113,22,.6);
+      color:#fff;
+      box-shadow:0 8px 22px rgba(248,113,22,.55);
     }
     .btn-primary:hover{background:#ea580c;}
     .btn-ghost{
-      background:transparent;
-      color:#e5e7eb;
-      border:1px solid #4b5563;
+      background:#FFFDF5;
+      color:#92400e;
+      border:1px solid #FACC15;
     }
-    .btn-ghost:hover{background:#111827;}
+    .btn-ghost:hover{background:#FFF7DF;}
     table{
       width:100%;
       border-collapse:collapse;
       font-size:12px;
-      color:#e5e7eb;
+      color:#422006;
     }
     th,td{
-      border-bottom:1px solid #1f2937;
+      border-bottom:1px solid #FACC15;
       padding:4px 6px;
       text-align:left;
     }
     th{
       font-weight:600;
-      color:#cbd5f5;
-      background:#020617;
+      color:#7c2d12;
+      background:#FFF7DF;
       position:sticky;
       top:0;
     }
     tbody tr:nth-child(even){
-      background:#020617;
+      background:#FFFDF5;
     }
     .swatch{
       width:16px;
       height:16px;
       border-radius:4px;
-      border:1px solid #0f172a;
+      border:1px solid #92400e;
       display:inline-block;
       margin-right:4px;
     }
@@ -2189,15 +2198,15 @@ PATTERN_DETAIL_HTML = r"""<!doctype html>
 
   <div class="layout">
     <div class="card">
-      <h2 style="margin:0 0 6px;font-size:1rem;">Pattern preview</h2>
-      <p style="margin:0 0 8px;font-size:12px;color:#9ca3af;">
+      <h2 style="margin:0 0 6px;font-size:1rem;color:#7c2d12;">Pattern preview</h2>
+      <p style="margin:0 0 8px;font-size:12px;color:#6b7280;">
         Clean, high‑resolution preview with no watermark or blur. Download the ZIP for the full chart and PDF.
       </p>
       <div class="preview">
         {% if preview_url %}
           <img src="{{ preview_url }}" alt="Pattern preview">
         {% else %}
-          <p style="font-size:12px;color:#9ca3af;">No inline preview available. Download the ZIP to see the pattern image.</p>
+          <p style="font-size:12px;color:#6b7280;">No inline preview available. Download the ZIP to see the pattern image.</p>
         {% endif %}
       </div>
       <div class="actions">
@@ -2209,8 +2218,8 @@ PATTERN_DETAIL_HTML = r"""<!doctype html>
     </div>
 
     <div class="card">
-      <h2 style="margin:0 0 6px;font-size:1rem;">Color legend</h2>
-      <p style="margin:0 0 8px;font-size:12px;color:#9ca3af;">
+      <h2 style="margin:0 0 6px;font-size:1rem;color:#7c2d12;">Color legend</h2>
+      <p style="margin:0 0 8px;font-size:12px;color:#6b7280;">
         Each row shows a palette entry for this pattern. Hex and RGB values help you match floss or yarn accurately.
       </p>
       {% if legend and legend|length > 0 %}
@@ -2241,7 +2250,7 @@ PATTERN_DETAIL_HTML = r"""<!doctype html>
           </table>
         </div>
       {% else %}
-        <p style="font-size:12px;color:#9ca3af;">Legend details are not available for this pattern.</p>
+        <p style="font-size:12px;color:#6b7280;">Legend details are not available for this pattern.</p>
       {% endif %}
     </div>
   </div>
@@ -2260,7 +2269,7 @@ PATTERN_PRINT_HTML = r"""<!doctype html>
       margin:0;
       font:14px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
       color:#111827;
-      background:#f9fafb;
+      background:#FFFEFB;
     }
     .wrap{
       max-width:900px;
@@ -2270,6 +2279,7 @@ PATTERN_PRINT_HTML = r"""<!doctype html>
     h1{
       margin:0 0 6px;
       font-size:1.2rem;
+      color:#7c2d12;
     }
     .meta{
       font-size:12px;
@@ -2320,8 +2330,8 @@ SUCCESS_HTML = r"""<!doctype html>
     body{
       margin:0;
       font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Inter;
-      background:#020617;
-      color:#e5e7eb;
+      background:linear-gradient(135deg,#FFF7DF,#FFFDF5);
+      color:#422006;
     }
     .wrap{
       max-width:520px;
@@ -2329,16 +2339,16 @@ SUCCESS_HTML = r"""<!doctype html>
       padding:32px 16px 40px;
     }
     .card{
-      background:rgba(15,23,42,.98);
-      border-radius:16px;
-      border:1px solid #1f2937;
+      background:#FFFEFB;
+      border-radius:18px;
+      border:1px solid #FACC15;
       padding:24px;
-      box-shadow:0 18px 40px rgba(0,0,0,.85);
+      box-shadow:0 18px 40px rgba(148,81,8,.2);
     }
-    h1{margin:0 0 10px;font-size:1.7rem;color:#f9fafb;}
-    p{margin:6px 0;font-size:14px;color:#e5e7eb}
+    h1{margin:0 0 10px;font-size:1.7rem;color:#7c2d12;}
+    p{margin:6px 0;font-size:14px;color:#4b5563}
     a{
-      color:#93c5fd;
+      color:#b45309;
       text-decoration:none;
       font-weight:600;
     }
