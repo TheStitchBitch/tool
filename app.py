@@ -1001,7 +1001,7 @@ INDEX_HTML = r"""
       “My patterns” for a week so you can re‑download or print later.
     </p>
     <div class="hero-cta">
-      <a class="pill" href="/signup">Get Started!</a>
+      <a class="pill" href="/signup">Create Free Account</a>
       <a class="pill secondary" href="/login">Log in</a>
     </div>
   </div>
@@ -1347,3 +1347,4 @@ PATTERN_DETAIL_HTML = r"""
 
 if __name__ == "__main__":
     app.run(debug=True)
+
